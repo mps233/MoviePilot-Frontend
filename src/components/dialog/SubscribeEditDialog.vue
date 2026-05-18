@@ -52,6 +52,7 @@ const subscribeForm = ref<Subscribe>({
   username: '',
   sites: [],
   best_version: undefined,
+  best_version_full: undefined,
   current_priority: 0,
   downloader: '',
   date: '',
@@ -226,6 +227,7 @@ async function getSubscribeInfo() {
     const result: Subscribe = await api.get(`subscribe/${props.subid}`)
     subscribeForm.value = result
     subscribeForm.value.best_version = subscribeForm.value.best_version === 1
+    subscribeForm.value.best_version_full = subscribeForm.value.best_version_full === 1
     subscribeForm.value.search_imdbid = subscribeForm.value.search_imdbid === 1
     // 加载剧集组
     if (subscribeForm.value.type == '电视剧') getEpisodeGroups()
@@ -273,6 +275,16 @@ const targetDirectories = computed(() => {
   return downloadDirectories.value.map(item => item.download_path)
 })
 
+// 仅电视剧订阅支持全集洗版，电影保持原有洗版逻辑
+const isTvSubscribe = computed(() => props.type === '电视剧' || subscribeForm.value.type === '电视剧')
+
+watch(
+  () => subscribeForm.value.best_version,
+  bestVersion => {
+    if (!bestVersion) subscribeForm.value.best_version_full = false
+  },
+)
+
 onMounted(() => {
   queryFilterRuleGroups()
   loadDownloadDirectories()
@@ -284,7 +296,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <DialogWrapper scrollable max-width="45rem" :fullscreen="!display.mdAndUp.value">
+  <VDialog scrollable max-width="45rem" :fullscreen="!display.mdAndUp.value">
     <VCard>
       <VCardItem class="py-2">
         <VDialogCloseBtn @click="emit('close')" />
@@ -426,6 +438,14 @@ onMounted(() => {
                       persistent-hint
                     />
                   </VCol>
+                  <VCol v-if="isTvSubscribe && subscribeForm.best_version" cols="12" md="4">
+                    <VSwitch
+                      v-model="subscribeForm.best_version_full"
+                      :label="t('dialog.subscribeEdit.bestVersionFull')"
+                      :hint="t('dialog.subscribeEdit.bestVersionFullHint')"
+                      persistent-hint
+                    />
+                  </VCol>
                   <VCol cols="12" md="4">
                     <VSwitch
                       v-model="subscribeForm.search_imdbid"
@@ -543,5 +563,5 @@ onMounted(() => {
         </VBtn>
       </VCardActions>
     </VCard>
-  </DialogWrapper>
+  </VDialog>
 </template>

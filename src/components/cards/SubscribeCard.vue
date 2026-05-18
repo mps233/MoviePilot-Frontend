@@ -1,9 +1,6 @@
 <script lang="ts" setup>
 import { useToast } from 'vue-toastification'
 import { useConfirm } from '@/composables/useConfirm'
-import SubscribeEditDialog from '../dialog/SubscribeEditDialog.vue'
-import SubscribeFilesDialog from '../dialog/SubscribeFilesDialog.vue'
-import SubscribeShareDialog from '../dialog/SubscribeShareDialog.vue'
 import { formatDateDifference, formatSeason } from '@/@core/utils/formatters'
 import api from '@/api'
 import type { Subscribe } from '@/api/types'
@@ -11,6 +8,11 @@ import router from '@/router'
 import { useI18n } from 'vue-i18n'
 import { useDisplay } from 'vuetify'
 import { useGlobalSettingsStore } from '@/stores'
+import { openSharedDialog } from '@/composables/useSharedDialog'
+
+const SubscribeEditDialog = defineAsyncComponent(() => import('../dialog/SubscribeEditDialog.vue'))
+const SubscribeFilesDialog = defineAsyncComponent(() => import('../dialog/SubscribeFilesDialog.vue'))
+const SubscribeShareDialog = defineAsyncComponent(() => import('../dialog/SubscribeShareDialog.vue'))
 
 // 显示器宽度
 const display = useDisplay()
@@ -21,6 +23,18 @@ const { t } = useI18n()
 // 输入参数
 const props = defineProps({
   media: Object as PropType<Subscribe>,
+  batchMode: {
+    type: Boolean,
+    default: false,
+  },
+  selected: {
+    type: Boolean,
+    default: false,
+  },
+  sortable: {
+    type: Boolean,
+    default: false,
+  },
 })
 
 // 从 provide 中获取全局设置
@@ -29,7 +43,7 @@ const globalSettingsStore = useGlobalSettingsStore()
 const globalSettings = globalSettingsStore.globalSettings
 
 // 定义触发的自定义事件
-const emit = defineEmits(['remove', 'save'])
+const emit = defineEmits(['remove', 'save', 'select'])
 
 // 确认框
 const createConfirm = useConfirm()
@@ -40,20 +54,30 @@ const $toast = useToast()
 // 图片是否加载完成
 const imageLoaded = ref(false)
 
-// 订阅弹窗
-const subscribeEditDialog = ref(false)
-
-// 订阅文件信息弹窗
-const subscribeFilesDialog = ref(false)
-
-// 分享订阅弹窗
-const subscribeShareDialog = ref(false)
-
 // 当前的订阅状态
 const subscribeState = ref<string>(props.media?.state ?? 'P')
 
 // 上一次更新时间
 const lastUpdateText = computed(() => (props.media?.last_update ? formatDateDifference(props.media.last_update) : ''))
+
+// 判断后端数字/布尔开关是否启用
+function isEnabledFlag(value: any) {
+  return value === true || value === 1 || value === '1'
+}
+
+// 订阅列表接口通常返回中文媒体类型，插件或缓存数据可能只保留剧集字段
+function isTvSubscribe(media?: Subscribe) {
+  return media?.type === '电视剧' || media?.type === 'tv' || !!media?.season || !!media?.total_episode
+}
+
+// TV 洗版订阅在卡片上展示分集或全集短标签
+const bestVersionModeLabel = computed(() => {
+  if (!isEnabledFlag(props.media?.best_version) || !isTvSubscribe(props.media)) return ''
+
+  return isEnabledFlag(props.media?.best_version_full)
+    ? t('subscribe.bestVersionWholeShort')
+    : t('subscribe.bestVersionEpisodeShort')
+})
 
 // 图片加载完成响应
 function imageLoadHandler() {
@@ -145,12 +169,22 @@ async function resetSubscribe() {
 
 //  分享订阅
 async function shareSubscribe() {
-  subscribeShareDialog.value = true
+  if (!props.media) return
+
+  openSharedDialog(SubscribeShareDialog, { sub: props.media }, {}, { closeOn: ['close'] })
 }
 
 // 编辑订阅响应
 async function editSubscribeDialog() {
-  subscribeEditDialog.value = true
+  openSharedDialog(
+    SubscribeEditDialog,
+    { subid: props.media?.id },
+    {
+      remove: onSubscribeEditRemove,
+      save: onSubscribeEditSave,
+    },
+    { closeOn: ['close', 'save', 'remove'] },
+  )
 }
 
 // 获得mediaid
@@ -176,7 +210,7 @@ async function viewMediaDetail() {
 
 // 查看文件详情
 async function viewSubscribeFiles() {
-  subscribeFilesDialog.value = true
+  openSharedDialog(SubscribeFilesDialog, { subid: props.media?.id }, {}, { closeOn: ['close'] })
 }
 
 // 弹出菜单
@@ -258,6 +292,7 @@ watch(
   (newOpenState, _) => {
     if (newOpenState) editSubscribeDialog()
   },
+  { immediate: true },
 )
 
 // 监听订阅状态
@@ -288,14 +323,27 @@ const posterUrl = computed(() => {
 
 // 订阅编辑保存
 function onSubscribeEditSave() {
-  subscribeEditDialog.value = false
   emit('save')
 }
 
 // 订阅编辑取消
 function onSubscribeEditRemove() {
-  subscribeEditDialog.value = false
   emit('remove')
+}
+
+// 处理卡片点击事件
+function handleCardClick() {
+  if (props.sortable) {
+    return
+  }
+
+  if (props.batchMode) {
+    // 批量模式下触发选择事件
+    emit('select')
+  } else {
+    // 非批量模式下打开编辑弹窗
+    editSubscribeDialog()
+  }
 }
 </script>
 
@@ -306,8 +354,9 @@ function onSubscribeEditRemove() {
         <div
           class="w-full h-full rounded-lg overflow-hidden"
           :class="{
-            'transition transform-cpu duration-300 -translate-y-1': hover.isHovering,
+            'transition transform-cpu duration-300 -translate-y-1': hover.isHovering && !props.sortable,
             'outline-dashed outline-1': props.media?.best_version && imageLoaded,
+            'outline-dotted outline-pink-500 outline-2': props.batchMode && props.selected,
           }"
         >
           <VCard
@@ -316,14 +365,15 @@ function onSubscribeEditRemove() {
             class="flex flex-col h-full"
             :class="{
               'opacity-70': subscribeState === 'S',
+              'cursor-move': props.sortable,
             }"
             rounded="0"
             min-height="150"
-            @click="editSubscribeDialog"
-            :ripple="false"
+            @click="handleCardClick"
+            :ripple="!props.batchMode && !props.sortable"
           >
-            <div class="me-n3 absolute top-1 right-4">
-              <IconBtn>
+            <div v-if="!props.sortable" class="me-n3 absolute top-1 right-4">
+              <IconBtn @click.stop>
                 <VIcon icon="mdi-dots-vertical" color="white" />
                 <VMenu activator="parent" close-on-content-click>
                   <VList>
@@ -360,7 +410,7 @@ function onSubscribeEditRemove() {
                 <div
                   class="h-auto w-12 flex-shrink-0 overflow-hidden rounded-md"
                   v-if="imageLoaded"
-                  :class="{ 'cursor-move': display.mdAndUp.value }"
+                  :class="{ 'cursor-move': props.sortable && display.mdAndUp.value }"
                 >
                   <VImg :src="posterUrl" aspect-ratio="2/3" cover>
                     <template #placeholder>
@@ -378,21 +428,39 @@ function onSubscribeEditRemove() {
                   </div>
                 </div>
               </VCardText>
-              <VCardText class="flex justify-space-between align-center flex-wrap px-3">
-                <div class="flex align-center">
+              <VCardText class="flex min-w-0 justify-space-between align-center flex-wrap px-3">
+                <div class="flex min-w-0 max-w-full align-center">
+                  <VIcon
+                    v-if="props.media?.total_episode && props.sortable"
+                    icon="mdi-progress-download"
+                    size="small"
+                    color="white"
+                    class="me-1"
+                  />
                   <IconBtn
-                    v-if="props.media?.total_episode"
+                    v-else-if="props.media?.total_episode"
                     size="small"
                     v-bind="props"
                     icon="mdi-progress-download"
                     color="white"
                   />
-                  <div v-if="props.media?.season" class="text-subtitle-2 me-2 text-white">
+                  <div v-if="props.media?.season" class="flex-shrink-0 text-subtitle-2 me-2 text-white">
                     {{ (props.media?.total_episode || 0) - (props.media?.lack_episode || 0) }} /
                     {{ props.media?.total_episode }}
                   </div>
-                  <IconBtn v-if="props.media?.username" icon="mdi-account" size="small" color="white" />
-                  <span v-if="props.media?.username" class="text-subtitle-2 text-white">
+                  <VChip
+                    v-if="bestVersionModeLabel"
+                    size="x-small"
+                    color="primary"
+                    variant="flat"
+                    class="me-2 flex-shrink-0"
+                  >
+                    {{ bestVersionModeLabel }}
+                  </VChip>
+                  <VIcon v-if="props.media?.username && props.sortable" icon="mdi-account" size="small" color="white" class="flex-shrink-0 me-1" />
+                  <IconBtn v-else-if="props.media?.username" icon="mdi-account" size="small" color="white" class="flex-shrink-0" />
+                  <!-- 用户名过长时限制在卡片宽度内，并用省略号展示剩余内容 -->
+                  <span v-if="props.media?.username" class="min-w-0 truncate text-subtitle-2 text-white" :title="props.media?.username">
                     {{ props.media?.username }}
                   </span>
                 </div>
@@ -417,30 +485,6 @@ function onSubscribeEditRemove() {
         </div>
       </template>
     </VHover>
-    <!-- 订阅编辑弹窗 -->
-    <SubscribeEditDialog
-      v-if="subscribeEditDialog"
-      v-model="subscribeEditDialog"
-      :subid="props.media?.id"
-      @remove="onSubscribeEditRemove"
-      @save="onSubscribeEditSave"
-      @close="subscribeEditDialog = false"
-    />
-
-    <!-- 订阅文件信息弹窗 -->
-    <SubscribeFilesDialog
-      v-if="subscribeFilesDialog"
-      v-model="subscribeFilesDialog"
-      :subid="props.media?.id"
-      @close="subscribeFilesDialog = false"
-    />
-    <!-- 分享订阅弹窗 -->
-    <SubscribeShareDialog
-      v-if="subscribeShareDialog"
-      v-model="subscribeShareDialog"
-      :sub="props.media"
-      @close="subscribeShareDialog = false"
-    />
   </div>
 </template>
 <style lang="scss" scoped>

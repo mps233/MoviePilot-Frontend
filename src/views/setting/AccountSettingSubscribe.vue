@@ -2,17 +2,21 @@
 import { useToast } from 'vue-toastification'
 import api from '@/api'
 import type { FilterRuleGroup, Site } from '@/api/types'
-import ProgressDialog from '@/components/dialog/ProgressDialog.vue'
 import { useI18n } from 'vue-i18n'
+import { useSilentSettingRefresh } from '@/composables/useSilentSettingRefresh'
 
 // 国际化
 const { t } = useI18n()
 
+const props = defineProps({
+  active: {
+    type: Boolean,
+    default: true,
+  },
+})
+
 // 提示框
 const $toast = useToast()
-
-// 进度框
-const progressDialog = ref(false)
 
 // 所有站点
 const allSites = ref<Site[]>([])
@@ -54,12 +58,20 @@ const rssIntervalItems = [
   { title: t('setting.subscribe.intervals.day1'), value: 1440 },
 ]
 
+// 订阅搜索时间间隔选择项（小时）
+const subscribeSearchIntervalItems = [
+  { title: t('setting.subscribe.intervals.day1'), value: 24 },
+  { title: t('setting.subscribe.intervals.day3'), value: 72 },
+  { title: t('setting.subscribe.intervals.week1'), value: 168 },
+]
+
 // 系统设置项
 const SystemSettings = ref<any>({
   // 基础设置
   Basic: {
     SUBSCRIBE_MODE: 'auto',
     SUBSCRIBE_SEARCH: false,
+    SUBSCRIBE_SEARCH_INTERVAL: 24,
     SUBSCRIBE_RSS_INTERVAL: 30,
     LOCAL_EXISTS_SEARCH: false,
   },
@@ -176,12 +188,22 @@ async function saveSubscribeSetting() {
   }
 }
 
+async function loadPageData() {
+  await Promise.all([
+    querySites(),
+    queryFilterRuleGroups(),
+    querySelectedRssSites(),
+    querySubscribeRules(),
+    loadSystemSettings(),
+  ])
+}
+
 onMounted(() => {
-  querySites()
-  queryFilterRuleGroups()
-  querySelectedRssSites()
-  querySubscribeRules()
-  loadSystemSettings()
+  loadPageData()
+})
+
+useSilentSettingRefresh(loadPageData, {
+  active: computed(() => props.active),
 })
 </script>
 
@@ -252,6 +274,16 @@ onMounted(() => {
                   persistent-hint
                 />
               </VCol>
+              <VCol v-if="SystemSettings.Basic.SUBSCRIBE_SEARCH" cols="12" md="6">
+                <VSelect
+                  v-model="SystemSettings.Basic.SUBSCRIBE_SEARCH_INTERVAL"
+                  :items="subscribeSearchIntervalItems"
+                  :label="t('setting.subscribe.searchInterval')"
+                  :hint="t('setting.subscribe.searchIntervalHint')"
+                  persistent-hint
+                  prepend-inner-icon="mdi-timer"
+                />
+              </VCol>
               <VCol cols="12" md="6">
                 <VSwitch
                   v-model="SystemSettings.Basic.LOCAL_EXISTS_SEARCH"
@@ -309,5 +341,4 @@ onMounted(() => {
     </VCol>
   </VRow>
   <!-- 进度框 -->
-  <ProgressDialog v-if="progressDialog" v-model="progressDialog" :text="t('setting.system.reloading')" />
 </template>

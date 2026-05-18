@@ -1,13 +1,14 @@
 <script lang="ts" setup>
-import { useToast } from 'vue-toastification'
-import VersionHistory from '../misc/VersionHistory.vue'
-import api from '@/api'
 import type { Plugin } from '@/api/types'
-import noImage from '@images/logos/plugin.png'
+import { getLogoUrl } from '@/utils/imageUtils'
 import { getDominantColor } from '@/@core/utils/image'
 import { isNullOrEmptyObject } from '@/@core/utils'
-import ProgressDialog from '@/components/dialog/ProgressDialog.vue'
+import { formatDownloadCount } from '@/@core/utils/formatters'
 import { useI18n } from 'vue-i18n'
+import { openSharedDialog } from '@/composables/useSharedDialog'
+
+const PluginMarketDetailDialog = defineAsyncComponent(() => import('@/components/dialog/PluginMarketDetailDialog.vue'))
+const PluginVersionHistoryDialog = defineAsyncComponent(() => import('@/components/dialog/PluginVersionHistoryDialog.vue'))
 
 // 输入参数
 const props = defineProps({
@@ -29,15 +30,6 @@ const backgroundColor = ref('#28A9E1')
 // 图片对象
 const imageRef = ref<any>()
 
-// 提示框
-const $toast = useToast()
-
-// 进度框
-const progressDialog = ref(false)
-
-// 进度框文本
-const progressText = ref('')
-
 // 获取当前插件的标签
 const pluginLabels = computed(() => {
   if (!props.plugin?.plugin_label) return []
@@ -54,12 +46,6 @@ const isImageLoaded = ref(false)
 // 图片是否加载失败
 const imageLoadError = ref(false)
 
-// 更新日志弹窗
-const releaseDialog = ref(false)
-
-// 插件详情弹窗
-const detailDialog = ref(false)
-
 // 图片加载完成
 async function imageLoaded() {
   isImageLoaded.value = true
@@ -68,45 +54,14 @@ async function imageLoaded() {
   backgroundColor.value = await getDominantColor(imageElement)
 }
 
-// 安装插件
-async function installPlugin() {
-  try {
-    // 显示等待提示框
-    progressDialog.value = true
-    progressText.value = t('plugin.installing', {
-      name: props.plugin?.plugin_name,
-      version: props?.plugin?.plugin_version,
-    })
-
-    const result: { [key: string]: any } = await api.get(`plugin/install/${props.plugin?.id}`, {
-      params: {
-        repo_url: props.plugin?.repo_url,
-        force: props.plugin?.has_update,
-      },
-    })
-
-    // 隐藏等待提示框
-    progressDialog.value = false
-
-    if (result.success) {
-      $toast.success(t('plugin.installSuccess', { name: props.plugin?.plugin_name }))
-      detailDialog.value = false
-      // 通知父组件刷新
-      emit('install')
-    } else {
-      $toast.error(t('plugin.installFailed', { name: props.plugin?.plugin_name, message: result.message }))
-    }
-  } catch (error) {
-    console.error(error)
-  }
-}
-
 // 计算图标路径
 const iconPath: Ref<string> = computed(() => {
-  if (imageLoadError.value) return noImage
+  if (imageLoadError.value) return getLogoUrl('plugin')
   // 如果是网络图片则使用代理后返回
   if (props.plugin?.plugin_icon?.startsWith('http'))
-    return `${import.meta.env.VITE_API_BASE_URL}system/img/1?imgurl=${encodeURIComponent(props.plugin?.plugin_icon)}&cache=true`
+    return `${import.meta.env.VITE_API_BASE_URL}system/img/1?imgurl=${encodeURIComponent(
+      props.plugin?.plugin_icon,
+    )}&cache=true`
 
   return `./plugin_icon/${props.plugin?.plugin_icon}`
 })
@@ -115,6 +70,9 @@ const iconPath: Ref<string> = computed(() => {
 function visitPluginPage() {
   // 将raw.githubusercontent.com转换为项目地址
   let repoUrl = props.plugin?.repo_url
+  if (props.plugin?.is_local || repoUrl?.startsWith('local://')) {
+    repoUrl = props.plugin?.author_url
+  }
   if (repoUrl) {
     if (repoUrl.includes('raw.githubusercontent.com')) {
       if (!repoUrl.endsWith('/')) repoUrl += '/'
@@ -136,7 +94,27 @@ function visitPluginPage() {
 
 // 显示更新日志
 function showUpdateHistory() {
-  releaseDialog.value = true
+  openSharedDialog(
+    PluginVersionHistoryDialog,
+    { plugin: props.plugin },
+    {},
+    { closeOn: ['close', 'update:modelValue'] },
+  )
+}
+
+/** 打开共享插件市场详情弹窗。 */
+function showPluginDetail() {
+  openSharedDialog(
+    PluginMarketDetailDialog,
+    {
+      plugin: props.plugin,
+      count: props.count,
+    },
+    {
+      install: () => emit('install'),
+    },
+    { closeOn: ['close', 'install', 'update:modelValue'] },
+  )
 }
 
 // 弹出菜单
@@ -160,6 +138,7 @@ const dropdownItems = ref([
     },
   },
 ])
+
 </script>
 
 <template>
@@ -170,7 +149,7 @@ const dropdownItems = ref([
           v-bind="hover.props"
           :width="props.width"
           :height="props.height"
-          @click="detailDialog = true"
+          @click="showPluginDetail"
           class="flex flex-col h-full"
           :class="{
             'transition transform-cpu duration-300 -translate-y-1': hover.isHovering,
@@ -242,11 +221,11 @@ const dropdownItems = ref([
               </div>
               <div v-if="props.count" class="ms-2 flex-shrink-0 download-count align-middle items-center">
                 <VIcon size="small" icon="mdi-download" />
-                <span class="text-sm">{{ props.count?.toLocaleString() }}</span>
+                <span class="text-sm">{{ formatDownloadCount(props.count) }}</span>
               </div>
             </div>
             <div class="absolute bottom-0 right-0">
-              <IconBtn>
+              <IconBtn @click.stop>
                 <VIcon size="small" icon="mdi-dots-vertical" />
                 <VMenu activator="parent" close-on-content-click>
                   <VList>
@@ -264,77 +243,5 @@ const dropdownItems = ref([
         </VCard>
       </template>
     </VHover>
-    <!-- 安装插件进度框 -->
-    <ProgressDialog v-if="progressDialog" v-model="progressDialog" :text="progressText" />
-    <!-- 更新日志 -->
-    <DialogWrapper v-if="releaseDialog" v-model="releaseDialog" width="600" scrollable>
-      <VCard :title="t('plugin.updateHistoryTitle', { name: props.plugin?.plugin_name })">
-        <VDialogCloseBtn @click="releaseDialog = false" />
-        <VDivider />
-        <VersionHistory :history="props.plugin?.history" />
-      </VCard>
-    </DialogWrapper>
-    <!-- 插件详情-->
-    <DialogWrapper v-if="detailDialog" v-model="detailDialog" max-width="30rem">
-      <VCard>
-        <VDialogCloseBtn @click="detailDialog = false" />
-        <VCardText>
-          <VCol>
-            <div class="d-flex justify-space-between flex-wrap flex-md-nowrap flex-column flex-md-row">
-              <div class="mx-auto mt-5">
-                <VAvatar size="64">
-                  <VImg
-                    ref="imageRef"
-                    :src="iconPath"
-                    aspect-ratio="4/3"
-                    cover
-                    @load="imageLoaded"
-                    @error="imageLoadError = true"
-                  />
-                </VAvatar>
-              </div>
-              <div class="flex-grow">
-                <VCardItem>
-                  <VCardTitle class="text-center text-md-left">
-                    {{ props.plugin?.plugin_name }}
-                  </VCardTitle>
-                  <VCardSubtitle
-                    class="text-center text-md-left break-words whitespace-break-spaces line-clamp-4 overflow-hidden text-ellipsis ..."
-                  >
-                    {{ props.plugin?.plugin_desc }}
-                  </VCardSubtitle>
-                  <VList lines="one">
-                    <VListItem class="ps-0">
-                      <VListItemTitle class="text-center text-md-left">
-                        <span class="font-weight-medium">{{ t('common.version') }}：</span>
-                        <span class="text-body-1"> v{{ props.plugin?.plugin_version }}</span>
-                      </VListItemTitle>
-                    </VListItem>
-                    <VListItem class="ps-0">
-                      <VListItemTitle class="text-center text-md-left">
-                        <span class="font-weight-medium">{{ t('common.author') }}：</span>
-                        <span class="text-body-1 cursor-pointer" @click="visitPluginPage">
-                          {{ props.plugin?.plugin_author }}
-                        </span>
-                      </VListItemTitle>
-                    </VListItem>
-                  </VList>
-                  <div class="text-center text-md-left">
-                    <VBtn color="primary" @click="installPlugin" prepend-icon="mdi-download">{{
-                      t('plugin.installToLocal')
-                    }}</VBtn>
-                    <div class="text-xs mt-2" v-if="props.count">
-                      <VIcon icon="mdi-fire" />{{
-                        t('plugin.totalDownloads', { count: props.count?.toLocaleString() })
-                      }}
-                    </div>
-                  </div>
-                </VCardItem>
-              </div>
-            </div>
-          </VCol>
-        </VCardText>
-      </VCard>
-    </DialogWrapper>
   </div>
 </template>

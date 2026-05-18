@@ -1,25 +1,32 @@
 <script lang="ts" setup>
-import draggable from 'vuedraggable'
 import { useToast } from 'vue-toastification'
 import api from '@/api'
 import type { Plugin } from '@/api/types'
 import NoDataFound from '@/components/NoDataFound.vue'
-import PluginAppCard from '@/components/cards/PluginAppCard.vue'
-import noImage from '@images/logos/plugin.png'
 import { useDisplay } from 'vuetify'
 import { isNullOrEmptyObject } from '@/@core/utils'
 import { getPluginTabs } from '@/router/i18n-menu'
-import PluginMarketSettingDialog from '@/components/dialog/PluginMarketSettingDialog.vue'
 import { useDynamicButton } from '@/composables/useDynamicButton'
 import { useI18n } from 'vue-i18n'
 import PluginMixedSortCard from '@/components/cards/PluginMixedSortCard.vue'
+import ProgressiveCardGrid from '@/components/misc/ProgressiveCardGrid.vue'
 import { usePWA } from '@/composables/usePWA'
 import { useDynamicHeaderTab } from '@/composables/useDynamicHeaderTab'
+import { useKeepAliveRefresh, type KeepAliveRefreshContext } from '@/composables/useKeepAliveRefresh'
+import { openSharedDialog } from '@/composables/useSharedDialog'
 
 // 国际化
 const { t } = useI18n()
 
 const route = useRoute()
+
+// 市场卡片、拖拽排序和市场设置只在对应标签/操作中需要，延迟到真正使用时加载。
+const Draggable = defineAsyncComponent(() => import('vuedraggable').then(module => module.default))
+const PluginAppCard = defineAsyncComponent(() => import('@/components/cards/PluginAppCard.vue'))
+const PluginFolderCreateDialog = defineAsyncComponent(() => import('@/components/dialog/PluginFolderCreateDialog.vue'))
+const PluginMarketSettingDialog = defineAsyncComponent(() => import('@/components/dialog/PluginMarketSettingDialog.vue'))
+const ProgressDialog = defineAsyncComponent(() => import('@/components/dialog/ProgressDialog.vue'))
+const PluginSearchDialog = defineAsyncComponent(() => import('@/components/dialog/PluginSearchDialog.vue'))
 
 // 显示器宽度
 const display = useDisplay()
@@ -30,9 +37,13 @@ const { appMode } = usePWA()
 
 // 当前标签
 const activeTab = ref('installed')
+const sortMode = ref(false)
 
 // 获取插件标签页
-const pluginTabs = computed(() => getPluginTabs())
+const pluginTabs = computed(() => getPluginTabs(t))
+
+// 本地插件来源显示名称
+const localRepoLabel = computed(() => t('plugin.local'))
 
 // 使用动态标签页
 const { registerHeaderTab } = useDynamicHeaderTab()
@@ -52,6 +63,16 @@ registerHeaderTab({
       dataAttr: 'installed-filter-btn',
       action: () => {
         filterInstalledPluginDialog.value = true
+      },
+      show: computed(() => activeTab.value === 'installed'),
+    },
+    {
+      icon: 'mdi-sort-variant',
+      variant: 'text',
+      color: computed(() => (sortMode.value ? 'warning' : 'gray')),
+      class: 'settings-icon-button',
+      action: () => {
+        sortMode.value = !sortMode.value
       },
       show: computed(() => activeTab.value === 'installed'),
     },
@@ -77,26 +98,6 @@ registerHeaderTab({
       show: computed(() => activeTab.value === 'market'),
     },
     {
-      icon: 'mdi-store-cog',
-      variant: 'text',
-      color: 'gray',
-      class: 'settings-icon-button',
-      action: () => {
-        MarketSettingDialog.value = true
-      },
-      show: computed(() => activeTab.value === 'market'),
-    },
-    {
-      icon: 'mdi-folder-plus',
-      variant: 'text',
-      color: 'gray',
-      class: 'settings-icon-button',
-      action: () => {
-        showNewFolderDialog()
-      },
-      show: computed(() => activeTab.value === 'installed' && !currentFolder.value),
-    },
-    {
       icon: 'mdi-arrow-left',
       variant: 'text',
       color: 'gray',
@@ -113,7 +114,7 @@ registerHeaderTab({
 const pluginId = ref(route.query.id)
 
 // 当前排序字段
-const activeSort = ref(null)
+const activeSort = ref<string | null>(null)
 
 // 插件顺序配置
 const orderConfig = ref<{ id: string; type?: string; order?: number }[]>([])
@@ -165,20 +166,11 @@ const PluginAppDialog = ref(false)
 // 插件安装统计
 const PluginStatistics = ref<{ [key: string]: number }>({})
 
-// 搜索窗口
-const SearchDialog = ref(false)
-
-// 插件市场设置窗口
-const MarketSettingDialog = ref(false)
-
 // 插件市场刷新状态
 const isMarketRefreshing = ref(false)
 
 // 搜索关键字
 const keyword = ref('')
-
-// 每一个插件的图标加载状态
-const pluginIconLoaded = ref<{ [key: string]: boolean }>({})
 
 // 每一个插件的动作标识
 const pluginActions: Ref<{ [key: string]: boolean }> = ref({})
@@ -186,11 +178,11 @@ const pluginActions: Ref<{ [key: string]: boolean }> = ref({})
 // 提示框
 const $toast = useToast()
 
-// 进度框
-const progressDialog = ref(false)
-
 // 进度框文本
 const progressText = ref(t('plugin.installingPlugin'))
+let folderCreateDialogController: ReturnType<typeof openSharedDialog> | null = null
+let progressDialogController: ReturnType<typeof openSharedDialog> | null = null
+let searchDialogController: ReturnType<typeof openSharedDialog> | null = null
 
 // 过滤表单
 const filterForm = reactive({
@@ -215,12 +207,19 @@ const defaultColor = '#2196F3'
 // 计算过滤表单是否全部为空
 const isFilterFormEmpty = computed(() => {
   return (
-    filterForm.name === '' &&
-    filterForm.author.length === 0 &&
-    filterForm.label.length === 0 &&
-    filterForm.repo.length === 0
+    !filterForm.name && filterForm.author.length === 0 && filterForm.label.length === 0 && filterForm.repo.length === 0
   )
 })
+
+// 切换市场过滤器多选项
+function toggleMarketFilter(field: 'author' | 'label' | 'repo', value: string) {
+  const index = filterForm[field].indexOf(value)
+  if (index > -1) {
+    filterForm[field].splice(index, 1)
+  } else {
+    filterForm[field].push(value)
+  }
+}
 
 // 插件过滤条件
 const installedFilter = ref(null)
@@ -254,10 +253,43 @@ const folderOrder = ref<string[]>([])
 const currentFolder = ref('')
 
 // 新建文件夹对话框
-const newFolderDialog = ref(false)
-
 // 新文件夹名称
 const newFolderName = ref('')
+
+const pluginByIdMap = computed(() => new Map(dataList.value.map(plugin => [plugin.id, plugin])))
+const orderValueMap = computed(() => {
+  const map = new Map<string, number>()
+
+  orderConfig.value.forEach((item, index) => {
+    map.set(`${item.type || 'plugin'}:${item.id}`, item.order ?? index)
+  })
+
+  return map
+})
+
+const folderedPluginIds = computed(() => {
+  const pluginIds = new Set<string>()
+
+  Object.values(pluginFolders.value).forEach(folderData => {
+    const plugins = Array.isArray(folderData) ? folderData : folderData.plugins || []
+    plugins.forEach((pluginId: string) => pluginIds.add(pluginId))
+  })
+
+  return pluginIds
+})
+
+const canDragSort = computed(() => sortMode.value && activeTab.value === 'installed')
+const shouldVirtualizeInstalledMainList = computed(() => !sortMode.value && !currentFolder.value)
+const shouldVirtualizeInstalledFolderList = computed(() => !sortMode.value && !!currentFolder.value)
+const installedScrollToIndex = computed(() => {
+  if (sortMode.value || currentFolder.value || !pluginId.value) {
+    return undefined
+  }
+
+  const targetIndex = mixedSortList.value.findIndex(item => item.type === 'plugin' && item.id === pluginId.value)
+
+  return targetIndex >= 0 ? targetIndex : undefined
+})
 
 // 获取文件夹内筛选后的插件
 const getFilteredFolderPlugins = (folderName: string) => {
@@ -267,7 +299,7 @@ const getFilteredFolderPlugins = (folderName: string) => {
   // 获取文件夹内的插件并应用筛选条件
   const folderPlugins: Plugin[] = []
   folderPluginIds.forEach((pluginId: string) => {
-    const plugin = dataList.value.find(p => p.id === pluginId)
+    const plugin = pluginByIdMap.value.get(pluginId)
     if (plugin) {
       folderPlugins.push(plugin)
     }
@@ -298,12 +330,7 @@ const getFilteredFolderPlugins = (folderName: string) => {
 const displayedPlugins = computed(() => {
   if (!currentFolder.value) {
     // 主列表：显示未归类的插件
-    const folderedPluginIds = new Set()
-    Object.values(pluginFolders.value).forEach(folderData => {
-      const plugins = Array.isArray(folderData) ? folderData : folderData.plugins || []
-      plugins.forEach((pid: string) => folderedPluginIds.add(pid))
-    })
-    return filteredDataList.value.filter(plugin => !folderedPluginIds.has(plugin.id))
+    return filteredDataList.value.filter(plugin => !folderedPluginIds.value.has(plugin.id))
   } else {
     // 文件夹内：返回筛选后的插件
     return getFilteredFolderPlugins(currentFolder.value)
@@ -375,23 +402,21 @@ function updateMixedSortList() {
 
     // 添加文件夹项目
     displayedFolders.value.forEach(folder => {
-      const orderItem = orderConfig.value.find((item: any) => item.type === 'folder' && item.id === folder.name)
       allItems.push({
         type: 'folder',
         id: folder.name,
         data: folder,
-        order: orderItem?.order ?? 999,
+        order: orderValueMap.value.get(`folder:${folder.name}`) ?? 999,
       })
     })
 
     // 添加插件项目
     displayedPlugins.value.forEach(plugin => {
-      const orderItem = orderConfig.value.find((item: any) => item.type === 'plugin' && item.id === plugin.id)
       allItems.push({
         type: 'plugin',
         id: plugin.id || '',
         data: plugin,
-        order: orderItem?.order ?? 999,
+        order: orderValueMap.value.get(`plugin:${plugin.id}`) ?? 999,
       })
     })
 
@@ -473,9 +498,10 @@ function sortPluginOrder() {
     return
   }
   dataList.value.sort((a, b) => {
-    const aIndex = orderConfig.value.findIndex((item: { id: string }) => item.id === a.id)
-    const bIndex = orderConfig.value.findIndex((item: { id: string }) => item.id === b.id)
-    return (aIndex === -1 ? 999 : aIndex) - (bIndex === -1 ? 999 : bIndex)
+    const aIndex = orderValueMap.value.get(`plugin:${a.id}`) ?? Number.MAX_SAFE_INTEGER
+    const bIndex = orderValueMap.value.get(`plugin:${b.id}`) ?? Number.MAX_SAFE_INTEGER
+
+    return aIndex - bIndex
   })
 }
 
@@ -515,7 +541,7 @@ async function saveMixedSortOrder() {
     Object.values(pluginFolders.value).forEach(folderData => {
       const plugins = Array.isArray(folderData) ? folderData : folderData.plugins || []
       plugins.forEach((id: string) => {
-        const folderPlugin = dataList.value.find(p => p.id === id)
+        const folderPlugin = pluginByIdMap.value.get(id)
         if (folderPlugin && !newPluginOrder.find(p => p.id === id)) {
           newPluginOrder.push(folderPlugin)
         }
@@ -603,15 +629,21 @@ async function saveFolderPluginOrder() {
 
 // 初始化过滤选项
 function initOptions(item: Plugin) {
-  const optionValue = (options: Array<string>, value: string | undefined) => {
-    value && !options.includes(value) && options.push(value)
+  const optionValue = (options: Array<string>, value: string | undefined, preferred = false) => {
+    if (!value || options.includes(value)) return
+    if (preferred) options.unshift(value)
+    else options.push(value)
   }
   const optionMutipleValue = (options: Array<string>, value: string | undefined) => {
     value && value.split(',').forEach(v => !options.includes(v) && options.push(v))
   }
   optionValue(authorFilterOptions.value, item.plugin_author)
   optionMutipleValue(labelFilterOptions.value, item.plugin_label)
-  optionValue(repoFilterOptions.value, handleRepoUrl(item.repo_url))
+  optionValue(
+    repoFilterOptions.value,
+    handleRepoUrl(item),
+    Boolean(item.is_local || item.repo_url?.startsWith('local://')),
+  )
 }
 
 // 关闭插件市场窗口
@@ -619,12 +651,24 @@ function pluginDialogClose() {
   PluginAppDialog.value = false
 }
 
+// 打开插件安装进度弹窗。
+function openPluginProgressDialog(text: string) {
+  progressDialogController?.close()
+  progressDialogController = openSharedDialog(ProgressDialog, { text }, {}, { closeOn: false })
+}
+
+// 关闭插件安装进度弹窗。
+function closePluginProgressDialog() {
+  progressDialogController?.close()
+  progressDialogController = null
+}
+
 // 安装插件
 async function installPlugin(item: Plugin) {
   try {
     // 显示等待提示框
-    progressDialog.value = true
     progressText.value = t('plugin.installing', { name: item?.plugin_name, version: item?.plugin_version })
+    openPluginProgressDialog(progressText.value)
 
     const result: { [key: string]: any } = await api.get(`plugin/install/${item?.id}`, {
       params: {
@@ -634,7 +678,7 @@ async function installPlugin(item: Plugin) {
     })
 
     // 隐藏等待提示框
-    progressDialog.value = false
+    closePluginProgressDialog()
 
     if (result.success) {
       $toast.success(t('plugin.installSuccess', { name: item?.plugin_name }))
@@ -643,11 +687,12 @@ async function installPlugin(item: Plugin) {
       enabledFilter.value = false
       installedFilter.value = null
       // 刷新
-      refreshData()
+      await refreshData()
     } else {
       $toast.error(t('plugin.installFailed', { name: item?.plugin_name, message: result.message }))
     }
   } catch (error) {
+    closePluginProgressDialog()
     console.error(error)
   }
 }
@@ -667,23 +712,8 @@ function openPlugin(item: Plugin) {
 
 // 关闭插件搜索窗口
 function closeSearchDialog() {
-  SearchDialog.value = false
-}
-
-// 插件图标加载错误
-function pluginIconError(item: Plugin) {
-  pluginIconLoaded.value[item.id || '0'] = false
-}
-
-// 插件图标地址
-function pluginIcon(item: Plugin) {
-  // 如果图片加载错误
-  if (pluginIconLoaded.value[item.id || '0'] === false) return noImage
-  // 如果是网络图片则使用代理后返回
-  if (item?.plugin_icon?.startsWith('http'))
-    return `${import.meta.env.VITE_API_BASE_URL}system/img/1?imgurl=${encodeURIComponent(item?.plugin_icon)}&cache=true`
-
-  return `./plugin_icon/${item?.plugin_icon}`
+  searchDialogController?.close()
+  searchDialogController = null
 }
 
 // 过滤插件
@@ -700,9 +730,13 @@ const filterPlugins = computed(() => {
 })
 
 // 获取插件列表数据
-async function fetchInstalledPlugins() {
+async function fetchInstalledPlugins(context: KeepAliveRefreshContext = {}) {
+  const showLoading = !context.silent || !isRefreshed.value
+
   try {
-    loading.value = true
+    if (showLoading) {
+      loading.value = true
+    }
     dataList.value = await api.get('plugin/', {
       params: {
         state: 'installed',
@@ -710,17 +744,24 @@ async function fetchInstalledPlugins() {
     })
     // 排序
     sortPluginOrder()
-    loading.value = false
     isRefreshed.value = true
   } catch (error) {
     console.error(error)
+  } finally {
+    if (showLoading) {
+      loading.value = false
+    }
   }
 }
 
 // 获取未安装插件列表数据
-async function fetchUninstalledPlugins(force: boolean = false) {
+async function fetchUninstalledPlugins(force: boolean = false, context: KeepAliveRefreshContext = {}) {
+  const showLoading = !context.silent || !isAppMarketLoaded.value
+
   try {
-    loading.value = true
+    if (showLoading) {
+      loading.value = true
+    }
     uninstalledList.value = await api.get('plugin/', {
       params: {
         state: 'market',
@@ -737,17 +778,21 @@ async function fetchUninstalledPlugins(force: boolean = false) {
         }
       }
     }
-    loading.value = false
     isRefreshed.value = true
     // 更新插件市场列表
     // 排除已安装且有更新的，上面的问题在于"本地存在未安装的旧版本插件且云端有更新时"不会在插件市场展示
     marketList.value = uninstalledList.value.filter(item => !(item.has_update && item.installed))
     // 初始化过滤选项
+    repoFilterOptions.value = []
     marketList.value.forEach(initOptions)
     // 设置APP市场加载完成
     isAppMarketLoaded.value = true
   } catch (error) {
     console.error(error)
+  } finally {
+    if (showLoading) {
+      loading.value = false
+    }
   }
 }
 
@@ -761,15 +806,16 @@ async function getPluginStatistics() {
 }
 
 // 加载所有数据
-async function refreshData() {
-  await fetchInstalledPlugins()
-  fetchUninstalledPlugins()
+async function refreshData(context: KeepAliveRefreshContext = {}) {
+  await fetchInstalledPlugins(context)
+  await fetchUninstalledPlugins(false, context)
+  await getPluginStatistics()
   // 重新加载文件夹配置，确保分身插件能正确显示在文件夹中
   await loadPluginFolders()
 }
 
 // 对uninstalledList进行排序到sortedUninstalledList
-watch([marketList, filterForm, activeSort], () => {
+watch([marketList, filterForm, activeSort, PluginStatistics], () => {
   // 匹配过滤函数
   const match = (filter: Array<string>, value: string | undefined) =>
     filter.length === 0 || (value && filter.includes(value))
@@ -787,7 +833,7 @@ watch([marketList, filterForm, activeSort], () => {
         filterText(filterForm.name, `${value.plugin_name} ${value.plugin_desc}`) &&
         match(filterForm.author, value.plugin_author) &&
         matchMultiple(filterForm.label, value.plugin_label) &&
-        match(filterForm.repo, handleRepoUrl(value.repo_url))
+        match(filterForm.repo, handleRepoUrl(value))
       ) {
         sortedUninstalledList.value.push(value)
       }
@@ -798,7 +844,7 @@ watch([marketList, filterForm, activeSort], () => {
   if (!isNullOrEmptyObject(PluginStatistics.value)) {
     if (!activeSort.value || activeSort.value === 'count') {
       sortedUninstalledList.value = sortedUninstalledList.value.sort((a, b) => {
-        return PluginStatistics.value[b.id || '0'] - PluginStatistics.value[a.id || '0']
+        return (PluginStatistics.value[b.id || '0'] ?? 0) - (PluginStatistics.value[a.id || '0'] ?? 0)
       })
     } else if (activeSort.value) {
       sortedUninstalledList.value = sortedUninstalledList.value.sort((a: any, b: any) => {
@@ -811,41 +857,67 @@ watch([marketList, filterForm, activeSort], () => {
   displayUninstalledList.value = sortedUninstalledList.value.splice(0, 20)
 })
 
-// 标签转换
-function pluginLabels(label: string | undefined) {
-  if (!label) return []
-  return label.split(',')
-}
-
 // 新安装了插件
-function pluginInstalled() {
+async function pluginInstalled() {
   pluginDialogClose()
-  refreshData()
+  await refreshData()
 }
 
 // 插件市场设置完成
 function marketSettingDone() {
-  MarketSettingDialog.value = false
   // 重新加载数据
   refreshData()
 }
 
 // 手动刷新插件市场
 async function refreshMarket() {
-  isMarketRefreshing.value = true
+  const showMarketLoading = !isAppMarketLoaded.value
+  if (showMarketLoading) {
+    isMarketRefreshing.value = true
+  }
   try {
-    await fetchUninstalledPlugins(true)
+    await fetchUninstalledPlugins(true, { silent: isAppMarketLoaded.value, source: 'manual' })
     await getPluginStatistics()
   } catch (error) {
     console.error(error)
   } finally {
-    isMarketRefreshing.value = false
+    if (showMarketLoading) {
+      isMarketRefreshing.value = false
+    }
+  }
+}
+
+async function refreshActiveTabData(context: KeepAliveRefreshContext = {}) {
+  if (sortMode.value || isDraggingSortMode.value) return
+
+  if (activeTab.value === 'market') {
+    await fetchUninstalledPlugins(false, context)
+    await getPluginStatistics()
+    return
+  }
+
+  await fetchInstalledPlugins(context)
+  await getPluginStatistics()
+  // 文件夹配置可能在其它入口被插件操作改变，重新进入时同步一次。
+  await loadPluginFolders()
+}
+
+function parseLocalRepoPath(repoUrl: string | undefined) {
+  if (!repoUrl?.startsWith('local://')) return ''
+
+  try {
+    return new URL(repoUrl).searchParams.get('path') || ''
+  } catch (error) {
+    return decodeURIComponent(repoUrl.match(/[?&]path=([^&]+)/)?.[1] || '')
   }
 }
 
 // 处理掉github地址的前缀
-function handleRepoUrl(url: string | undefined) {
+function handleRepoUrl(item: Plugin | string | undefined) {
+  const url = typeof item === 'string' ? item : item?.repo_url
   if (!url) return ''
+  if (url.startsWith('local://')) return parseLocalRepoPath(url) || localRepoLabel.value
+  if (typeof item !== 'string' && item?.is_local) return parseLocalRepoPath(url) || localRepoLabel.value
   return url.replace('https://github.com/', '').replace('https://raw.githubusercontent.com/', '')
 }
 
@@ -869,6 +941,11 @@ watch([dataList, installedFilter, hasUpdateFilter, enabledFilter], () => {
 function loadMarketMore({ done }: { done: any }) {
   // 从 dataList 中获取最前面的 20 个元素
   const itemsToMove = sortedUninstalledList.value.splice(0, 20)
+  if (itemsToMove.length === 0) {
+    done('empty')
+    return
+  }
+
   displayUninstalledList.value.push(...itemsToMove)
   done('ok')
 }
@@ -879,7 +956,6 @@ onMounted(async () => {
   await loadPluginOrderConfig()
   await loadPluginFolders() // 加载文件夹配置
   await refreshData()
-  getPluginStatistics()
   if (activeTab.value != 'market' && pluginId.value) {
     // 找到这个插件
     const plugin = dataList.value.find(item => item.id === pluginId.value)
@@ -889,12 +965,89 @@ onMounted(async () => {
   }
 })
 
-// 使用动态按钮钩子
+const { refresh: refreshKeepAliveData } = useKeepAliveRefresh(refreshActiveTabData)
+
+watch(activeTab, (newTab, oldTab) => {
+  if (!oldTab || newTab === oldTab) return
+
+  refreshKeepAliveData({ silent: true, source: 'tab' })
+})
+
+onUnmounted(() => {
+  closePluginProgressDialog()
+  folderCreateDialogController?.close()
+  searchDialogController?.close()
+})
+
+function openPluginSearchDialog() {
+  searchDialogController = openSharedDialog(
+    PluginSearchDialog,
+    {
+      keyword: keyword.value,
+      plugins: filterPlugins.value,
+    },
+    {
+      'open-plugin': openPlugin,
+      'update:keyword': (value: string) => {
+        keyword.value = value
+        searchDialogController?.updateProps({ keyword: value, plugins: filterPlugins.value })
+      },
+    },
+    { closeOn: ['close'] },
+  )
+}
+
+function openMarketSettingDialog() {
+  openSharedDialog(
+    PluginMarketSettingDialog,
+    {},
+    {
+      save: marketSettingDone,
+    },
+    { closeOn: ['close', 'save'] },
+  )
+}
+
+const showSearchAction = computed(() => activeTab.value === 'installed' || activeTab.value === 'market')
+const showNewFolderAction = computed(() => activeTab.value === 'installed' && !currentFolder.value)
+const showMarketSettingAction = computed(() => activeTab.value === 'market')
+
+const pluginDynamicMenuItems = computed(() => {
+  if (!appMode.value) return undefined
+  if (!showSearchAction.value) return undefined
+
+  const items = [
+    {
+      titleKey: 'plugin.searchPlugins',
+      icon: 'mdi-magnify',
+      action: openPluginSearchDialog,
+    },
+  ]
+
+  if (showNewFolderAction.value) {
+    items.push({
+      titleKey: 'plugin.newFolder',
+      icon: 'mdi-folder-plus',
+      action: showNewFolderDialog,
+    })
+  }
+
+  if (showMarketSettingAction.value) {
+    items.push({
+      titleKey: 'dialog.pluginMarketSetting.title',
+      icon: 'mdi-store-cog',
+      action: openMarketSettingDialog,
+    })
+  }
+
+  return items.length > 1 ? items : undefined
+})
+
 useDynamicButton({
   icon: 'mdi-magnify',
-  onClick: () => {
-    SearchDialog.value = true
-  },
+  onClick: openPluginSearchDialog,
+  menuItems: pluginDynamicMenuItems,
+  show: computed(() => appMode.value && showSearchAction.value && isRefreshed.value),
 })
 
 // 获取插件文件夹配置
@@ -942,12 +1095,8 @@ async function loadPluginFolders() {
     // 设置文件夹排序 - 使用全局排序配置
     const folderNames = Object.keys(processedFolders)
     folderOrder.value = folderNames.sort((a, b) => {
-      // 从全局排序配置中查找文件夹的order
-      const aOrderItem = orderConfig.value.find((item: any) => item.type === 'folder' && item.id === a)
-      const bOrderItem = orderConfig.value.find((item: any) => item.type === 'folder' && item.id === b)
-
-      const aOrder = aOrderItem?.order ?? processedFolders[a].order ?? 999
-      const bOrder = bOrderItem?.order ?? processedFolders[b].order ?? 999
+      const aOrder = orderValueMap.value.get(`folder:${a}`) ?? processedFolders[a].order ?? 999
+      const bOrder = orderValueMap.value.get(`folder:${b}`) ?? processedFolders[b].order ?? 999
 
       return aOrder - bOrder
     })
@@ -1008,7 +1157,8 @@ async function createNewFolder() {
     // 保存到后端
     await savePluginFolders()
 
-    newFolderDialog.value = false
+    folderCreateDialogController?.close()
+    folderCreateDialogController = null
     newFolderName.value = ''
     $toast.success(t('plugin.folderCreateSuccess'))
   } catch (error) {
@@ -1105,7 +1255,18 @@ async function deleteFolder(folderName: string) {
 // 显示新建文件夹对话框
 function showNewFolderDialog() {
   newFolderName.value = ''
-  newFolderDialog.value = true
+  folderCreateDialogController = openSharedDialog(
+    PluginFolderCreateDialog,
+    { name: newFolderName.value },
+    {
+      create: createNewFolder,
+      'update:name': (value: string) => {
+        newFolderName.value = value
+        folderCreateDialogController?.updateProps({ name: value })
+      },
+    },
+    { closeOn: ['close'] },
+  )
 }
 
 // 移出文件夹
@@ -1176,7 +1337,7 @@ async function handleDropToFolder(event: DragEvent, folderName: string) {
     }
 
     // 验证插件ID
-    const plugin = filteredDataList.value.find(p => p.id === pluginId)
+    const plugin = pluginByIdMap.value.get(pluginId)
 
     if (!plugin) {
       return
@@ -1292,113 +1453,136 @@ function onDragStartPlugin(evt: any) {
 
 <template>
   <div>
-    <!-- 过滤弹窗 -->
+    <!-- 已安装插件过滤下拉菜单 -->
     <Teleport to="body" v-if="filterInstalledPluginDialog">
       <VMenu
         v-model="filterInstalledPluginDialog"
-        width="20rem"
         :close-on-content-click="false"
         :activator="'[data-menu-activator=installed-filter-btn]'"
         location="bottom end"
       >
-        <VCard>
-          <VCardItem>
-            <VCardTitle>
-              <VIcon icon="mdi-filter-multiple-outline" class="mr-2" />
-              {{ t('plugin.filterPlugins') }}
-            </VCardTitle>
-            <VDialogCloseBtn @click="filterInstalledPluginDialog = false" />
-          </VCardItem>
-          <VCardText>
-            <VRow>
-              <VCol cols="12">
-                <VCombobox
-                  v-model="installedFilter"
-                  :items="installedPluginNames"
-                  :label="t('plugin.name')"
-                  density="comfortable"
-                  clearable
-                />
-              </VCol>
-              <VCol cols="6">
-                <VSwitch v-model="enabledFilter" :label="t('plugin.running')" />
-              </VCol>
-              <VCol cols="6">
-                <VSwitch v-model="hasUpdateFilter" :label="t('plugin.hasNewVersion')" />
-              </VCol>
-            </VRow>
-          </VCardText>
+        <VCard min-width="220">
+          <!-- 名称搜索 -->
+          <div class="pa-3">
+            <VCombobox
+              v-model="installedFilter"
+              :items="installedPluginNames"
+              :placeholder="t('plugin.name')"
+              prepend-inner-icon="mdi-magnify"
+              density="compact"
+              variant="outlined"
+              hide-details
+              clearable
+            />
+          </div>
+          <VDivider class="mt-2" />
+          <!-- 快捷筛选 -->
+          <VList density="compact" class="px-2 py-1">
+            <VListSubheader>{{ t('common.filter') }}</VListSubheader>
+            <VListItem :active="enabledFilter" @click="enabledFilter = !enabledFilter" density="compact">
+              <template #prepend>
+                <VIcon icon="mdi-play-circle" color="success" size="small" />
+              </template>
+              <VListItemTitle>{{ t('plugin.running') }}</VListItemTitle>
+              <template #append>
+                <VIcon v-if="enabledFilter" icon="mdi-check" color="primary" size="small" />
+              </template>
+            </VListItem>
+            <VListItem :active="hasUpdateFilter" @click="hasUpdateFilter = !hasUpdateFilter" density="compact">
+              <template #prepend>
+                <VIcon icon="mdi-arrow-up-circle" color="info" size="small" />
+              </template>
+              <VListItemTitle>{{ t('plugin.hasNewVersion') }}</VListItemTitle>
+              <template #append>
+                <VIcon v-if="hasUpdateFilter" icon="mdi-check" color="primary" size="small" />
+              </template>
+            </VListItem>
+          </VList>
         </VCard>
       </VMenu>
     </Teleport>
 
+    <!-- 插件市场过滤下拉菜单 -->
     <Teleport to="body" v-if="filterMarketPluginDialog">
       <VMenu
         v-model="filterMarketPluginDialog"
-        width="25rem"
         :close-on-content-click="false"
         :activator="'[data-menu-activator=market-filter-btn]'"
         location="bottom end"
       >
-        <VCard>
-          <VCardItem>
-            <VCardTitle>
-              <VIcon icon="mdi-filter-multiple-outline" class="mr-2" />
-              {{ t('plugin.filterPlugins') }}
-            </VCardTitle>
-            <VDialogCloseBtn @click="filterMarketPluginDialog = false" />
-          </VCardItem>
-          <VCardText>
-            <!-- 过滤表单 -->
-            <div v-if="isAppMarketLoaded">
-              <VRow>
-                <VCol cols="6">
-                  <VTextField v-model="filterForm.name" density="comfortable" :label="t('plugin.name')" clearable />
-                </VCol>
-                <VCol v-if="authorFilterOptions.length > 0" cols="6">
-                  <VSelect
-                    v-model="filterForm.author"
-                    :items="authorFilterOptions"
-                    density="comfortable"
-                    chips
-                    :label="t('plugin.author')"
-                    multiple
-                    clearable
-                  />
-                </VCol>
-                <VCol v-if="labelFilterOptions.length > 0" cols="6">
-                  <VSelect
-                    v-model="filterForm.label"
-                    :items="labelFilterOptions"
-                    density="comfortable"
-                    chips
-                    :label="t('plugin.label')"
-                    multiple
-                    clearable
-                  />
-                </VCol>
-                <VCol v-if="repoFilterOptions.length > 0" cols="6">
-                  <VSelect
-                    v-model="filterForm.repo"
-                    :items="repoFilterOptions"
-                    density="comfortable"
-                    chips
-                    :label="t('plugin.repository')"
-                    multiple
-                    clearable
-                  />
-                </VCol>
-                <VCol v-if="sortOptions.length > 0" cols="6">
-                  <VSelect
-                    v-model="activeSort"
-                    :items="sortOptions"
-                    density="comfortable"
-                    :label="t('plugin.sortTitle')"
-                  />
-                </VCol>
-              </VRow>
-            </div>
-          </VCardText>
+        <VCard min-width="260" max-width="320">
+          <!-- 名称搜索 -->
+          <div class="pa-3">
+            <VTextField
+              v-model="filterForm.name"
+              :placeholder="t('plugin.name')"
+              prepend-inner-icon="mdi-magnify"
+              density="compact"
+              variant="outlined"
+              hide-details
+              clearable
+            />
+          </div>
+          <VDivider class="mt-2" />
+          <!-- 排序 -->
+          <VList density="compact" class="px-2 py-1">
+            <VListSubheader>{{ t('plugin.sortTitle') }}</VListSubheader>
+            <VListItem
+              v-for="option in sortOptions"
+              :key="option.value"
+              :active="(activeSort || 'count') === option.value"
+              @click="activeSort = option.value"
+              density="compact"
+            >
+              <VListItemTitle>{{ option.title }}</VListItemTitle>
+              <template #append>
+                <VIcon v-if="(activeSort || 'count') === option.value" icon="mdi-check" color="primary" size="small" />
+              </template>
+            </VListItem>
+          </VList>
+          <!-- 下拉多选筛选项 -->
+          <VDivider />
+          <div class="px-3 py-2 d-flex flex-column gap-2">
+            <VSelect
+              v-if="authorFilterOptions.length > 0"
+              v-model="filterForm.author"
+              :items="authorFilterOptions"
+              :label="t('plugin.author')"
+              multiple
+              chips
+              closable-chips
+              density="compact"
+              variant="outlined"
+              hide-details
+              clearable
+            />
+            <VSelect
+              v-if="labelFilterOptions.length > 0"
+              v-model="filterForm.label"
+              :items="labelFilterOptions"
+              :label="t('plugin.label')"
+              multiple
+              chips
+              closable-chips
+              density="compact"
+              variant="outlined"
+              hide-details
+              clearable
+            />
+            <VSelect
+              v-if="repoFilterOptions.length > 0"
+              v-model="filterForm.repo"
+              :items="repoFilterOptions"
+              :label="t('plugin.repository')"
+              multiple
+              chips
+              closable-chips
+              density="compact"
+              variant="outlined"
+              hide-details
+              clearable
+            />
+          </div>
         </VCard>
       </VMenu>
     </Teleport>
@@ -1410,17 +1594,25 @@ function onDragStartPlugin(evt: any) {
           <div>
             <VPageContentTitle v-if="installedFilter" :title="t('plugin.filter', { name: installedFilter })" />
             <LoadingBanner v-if="!isRefreshed" class="mt-12" />
+            <VAlert v-if="sortMode" color="warning" variant="tonal" class="mb-4">
+              <div class="d-flex flex-wrap align-center justify-space-between gap-2">
+                <span>{{ t('common.sortModeHint') }}</span>
+                <VBtn variant="tonal" color="error" @click="sortMode = false">
+                  {{ t('common.exit') }}
+                </VBtn>
+              </div>
+            </VAlert>
 
             <!-- 文件夹和插件网格 -->
             <div v-if="(mixedSortList.length > 0 || displayedPlugins.length > 0) && isRefreshed">
               <!-- 混合排序列表（文件夹和插件） -->
               <template v-if="!currentFolder">
                 <!-- 主列表：使用draggable进行混合排序 -->
-                <draggable
+                <Draggable
+                  v-if="canDragSort"
                   v-model="mixedSortList"
                   @end="saveMixedSortOrder"
                   @start="onDragStartPlugin"
-                  handle=".cursor-move"
                   item-key="id"
                   tag="div"
                   class="grid gap-4 grid-plugin-card"
@@ -1431,6 +1623,7 @@ function onDragStartPlugin(evt: any) {
                       :item="element"
                       :plugin-statistics="PluginStatistics"
                       :plugin-actions="pluginActions"
+                      :sortable="true"
                       @open-folder="openFolder"
                       @delete-folder="deleteFolder"
                       @rename-folder="(oldName, newName) => renameFolder(oldName, newName)"
@@ -1444,16 +1637,44 @@ function onDragStartPlugin(evt: any) {
                       @drop-to-folder="(event, folderName) => handleDropToFolder(event, folderName)"
                     />
                   </template>
-                </draggable>
+                </Draggable>
+                <ProgressiveCardGrid
+                  v-else-if="shouldVirtualizeInstalledMainList"
+                  :items="mixedSortList"
+                  :get-item-key="item => `${item.type}:${item.id}`"
+                  :min-item-width="256"
+                  :estimated-item-height="180"
+                  :scroll-to-index="installedScrollToIndex"
+                >
+                  <template #default="{ item }">
+                    <PluginMixedSortCard
+                      :item="item"
+                      :plugin-statistics="PluginStatistics"
+                      :plugin-actions="pluginActions"
+                      :sortable="false"
+                      @open-folder="openFolder"
+                      @delete-folder="deleteFolder"
+                      @rename-folder="(oldName, newName) => renameFolder(oldName, newName)"
+                      @update-folder-config="(folderName, config) => updateFolderConfig(folderName, config)"
+                      @refresh-data="refreshData"
+                      @action-done="
+                        pluginId => {
+                          pluginActions[pluginId] = false
+                        }
+                      "
+                      @drop-to-folder="(event, folderName) => handleDropToFolder(event, folderName)"
+                    />
+                  </template>
+                </ProgressiveCardGrid>
               </template>
 
               <template v-else>
                 <!-- 文件夹内：使用draggable排序 + 移出按钮 -->
-                <draggable
+                <Draggable
+                  v-if="canDragSort"
                   v-model="draggableFolderPlugins"
                   @end="saveFolderPluginOrder"
                   @start="onDragStartPlugin"
-                  handle=".cursor-move"
                   item-key="id"
                   tag="div"
                   class="grid gap-4 grid-plugin-card"
@@ -1464,6 +1685,7 @@ function onDragStartPlugin(evt: any) {
                       :item="{ type: 'plugin', id: element.id, data: element, order: 0 }"
                       :plugin-statistics="PluginStatistics"
                       :plugin-actions="pluginActions"
+                      :sortable="true"
                       :show-remove-button="true"
                       @refresh-data="refreshData"
                       @action-done="
@@ -1474,7 +1696,31 @@ function onDragStartPlugin(evt: any) {
                       @remove-from-folder="removeFromFolder"
                     />
                   </template>
-                </draggable>
+                </Draggable>
+                <ProgressiveCardGrid
+                  v-else-if="shouldVirtualizeInstalledFolderList"
+                  :items="draggableFolderPlugins"
+                  :get-item-key="item => item.id"
+                  :min-item-width="256"
+                  :estimated-item-height="180"
+                >
+                  <template #default="{ item }">
+                    <PluginMixedSortCard
+                      :item="{ type: 'plugin', id: item.id, data: item, order: 0 }"
+                      :plugin-statistics="PluginStatistics"
+                      :plugin-actions="pluginActions"
+                      :sortable="false"
+                      :show-remove-button="true"
+                      @refresh-data="refreshData"
+                      @action-done="
+                        pluginId => {
+                          pluginActions[pluginId] = false
+                        }
+                      "
+                      @remove-from-folder="removeFromFolder"
+                    />
+                  </template>
+                </ProgressiveCardGrid>
               </template>
             </div>
 
@@ -1493,10 +1739,13 @@ function onDragStartPlugin(evt: any) {
       <VWindowItem value="market">
         <transition name="fade-slide" appear>
           <div>
-            <LoadingBanner v-if="!isAppMarketLoaded || isMarketRefreshing" class="mt-12" />
+            <LoadingBanner
+              v-if="!isAppMarketLoaded || (isMarketRefreshing && displayUninstalledList.length === 0)"
+              class="mt-12"
+            />
             <!-- 资源列表 -->
             <VInfiniteScroll
-              v-if="isAppMarketLoaded && !isMarketRefreshing"
+              v-if="isAppMarketLoaded && !(isMarketRefreshing && displayUninstalledList.length === 0)"
               mode="intersect"
               side="end"
               :items="displayUninstalledList"
@@ -1505,14 +1754,17 @@ function onDragStartPlugin(evt: any) {
             >
               <template #loading />
               <template #empty />
-              <div class="grid gap-4 grid-plugin-card">
-                <template
-                  v-for="(data, index) in displayUninstalledList"
-                  :key="`${data.id}_v${data.plugin_version}_${index}`"
-                >
-                  <PluginAppCard :plugin="data" :count="PluginStatistics[data.id || '0']" @install="pluginInstalled" />
+              <ProgressiveCardGrid
+                v-if="displayUninstalledList.length > 0"
+                :items="displayUninstalledList"
+                :get-item-key="item => `${item.id}_v${item.plugin_version}`"
+                :min-item-width="256"
+                :estimated-item-height="260"
+              >
+                <template #default="{ item }">
+                  <PluginAppCard :plugin="item" :count="PluginStatistics[item.id || '0']" @install="pluginInstalled" />
                 </template>
-              </div>
+              </ProgressiveCardGrid>
             </VInfiniteScroll>
             <NoDataFound
               v-if="displayUninstalledList.length === 0 && isAppMarketLoaded"
@@ -1528,123 +1780,32 @@ function onDragStartPlugin(evt: any) {
 
   <!-- 插件搜索图标 -->
   <Teleport to="body" v-if="route.path === '/plugins'">
-    <div v-if="isRefreshed">
+    <div v-if="isRefreshed && !appMode && showSearchAction" class="compact-fab-stack">
       <VFab
-        v-if="!appMode"
-        icon="mdi-magnify"
-        color="info"
-        location="bottom"
-        size="x-large"
-        fixed
-        app
+        v-if="showMarketSettingAction"
+        icon="mdi-store-cog"
+        color="warning"
+        variant="tonal"
         appear
-        @click="SearchDialog = true"
-        :class="{ 'mb-12': appMode }"
+        class="compact-fab compact-fab--secondary"
+        @click="openMarketSettingDialog"
+      />
+      <VFab
+        v-if="showNewFolderAction"
+        icon="mdi-folder-plus"
+        color="success"
+        variant="tonal"
+        appear
+        class="compact-fab compact-fab--secondary"
+        @click="showNewFolderDialog"
+      />
+      <VFab
+        icon="mdi-magnify"
+        color="primary"
+        appear
+        class="compact-fab compact-fab--primary"
+        @click="openPluginSearchDialog"
       />
     </div>
   </Teleport>
-  <!-- 插件市场设置窗口 -->
-  <PluginMarketSettingDialog
-    v-if="MarketSettingDialog"
-    v-model="MarketSettingDialog"
-    @close="MarketSettingDialog = false"
-    @save="marketSettingDone"
-  />
-
-  <!-- 插件搜索窗口 -->
-  <DialogWrapper
-    v-if="SearchDialog"
-    v-model="SearchDialog"
-    scrollable
-    max-width="40rem"
-    :max-height="!display.mdAndUp.value ? '' : '85vh'"
-    :fullscreen="!display.mdAndUp.value"
-  >
-    <VCard class="mx-auto" width="100%">
-      <VToolbar flat class="p-0">
-        <VTextField
-          v-model="keyword"
-          :label="t('plugin.searchPlugins')"
-          single-line
-          :placeholder="t('plugin.searchPlaceholder')"
-          variant="solo"
-          prepend-inner-icon="mdi-magnify"
-          flat
-          class="mx-1"
-        />
-      </VToolbar>
-      <VDialogCloseBtn @click="closeSearchDialog" />
-      <VList v-if="filterPlugins.length > 0" lines="two">
-        <VVirtualScroll :items="filterPlugins">
-          <template #default="{ item }">
-            <VListItem @click="openPlugin(item)">
-              <template #prepend>
-                <VAvatar>
-                  <VImg :src="pluginIcon(item)" @error="pluginIconError(item)">
-                    <template #placeholder>
-                      <div class="w-full h-full">
-                        <VSkeletonLoader class="object-cover aspect-w-1 aspect-h-1" />
-                      </div>
-                    </template>
-                  </VImg>
-                </VAvatar>
-              </template>
-              <VListItemTitle>
-                {{ item.plugin_name }}<span class="text-sm ms-2 mt-1 text-gray-500">v{{ item?.plugin_version }}</span>
-                <VIcon v-if="item.installed" color="success" icon="mdi-check-circle" class="ms-2" size="small" />
-              </VListItemTitle>
-              <VListItemSubtitle>
-                <VChip
-                  v-for="label in pluginLabels(item.plugin_label)"
-                  variant="tonal"
-                  size="small"
-                  class="me-1 my-1"
-                  color="info"
-                  label
-                >
-                  {{ label }}
-                </VChip>
-                {{ item.plugin_desc }}
-              </VListItemSubtitle>
-            </VListItem>
-          </template>
-        </VVirtualScroll>
-      </VList>
-    </VCard>
-  </DialogWrapper>
-
-  <!-- 安装插件进度框 -->
-  <DialogWrapper v-if="progressDialog" v-model="progressDialog" :scrim="false" width="25rem">
-    <VCard color="primary">
-      <VCardText class="text-center">
-        {{ progressText }}
-        <VProgressLinear indeterminate color="white" class="mb-0 mt-1" />
-      </VCardText>
-    </VCard>
-  </DialogWrapper>
-
-  <!-- 新建文件夹对话框 -->
-  <DialogWrapper v-if="newFolderDialog" v-model="newFolderDialog" max-width="400">
-    <VCard>
-      <VDialogCloseBtn @click="newFolderDialog = false" />
-      <VCardItem>
-        <VCardTitle>{{ t('plugin.newFolder') }}</VCardTitle>
-      </VCardItem>
-      <VDivider />
-      <VCardText>
-        <VTextField
-          v-model="newFolderName"
-          :label="t('plugin.folderName')"
-          variant="outlined"
-          @keyup.enter="createNewFolder"
-        />
-      </VCardText>
-      <VCardActions>
-        <VSpacer />
-        <VBtn color="primary" @click="createNewFolder" prepend-icon="mdi-folder-plus" class="px-5">{{
-          t('plugin.create')
-        }}</VBtn>
-      </VCardActions>
-    </VCard>
-  </DialogWrapper>
 </template>

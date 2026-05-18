@@ -1,8 +1,12 @@
-import { useI18n } from 'vue-i18n'
+import { useGlobalSettingsStore } from '@/stores'
+import type { Composer } from 'vue-i18n'
 
 // 构建路由菜单，每次调用时使用当前的语言环境
-export function getNavMenus() {
-  const { t } = useI18n()
+export function getNavMenus(t: Composer['t']) {
+  const globalSettingsStore = useGlobalSettingsStore()
+
+  // 检查是否为高级模式
+  const isAdvancedMode = globalSettingsStore.get('ADVANCED_MODE') !== false
 
   return [
     {
@@ -127,21 +131,23 @@ export function getNavMenus() {
       admin: true,
       permission: 'admin',
     },
-    {
-      title: t('navItems.settings'),
-      icon: 'mdi-cog-outline',
-      to: '/setting',
-      header: t('menu.system'),
-      admin: true,
-      permission: 'admin',
-    },
+    ...(isAdvancedMode
+      ? [
+          {
+            title: t('navItems.settings'),
+            icon: 'mdi-cog-outline',
+            to: '/setting',
+            header: t('menu.system'),
+            admin: true,
+            permission: 'admin',
+          },
+        ]
+      : []),
   ]
 }
 
 // 获取设置标签页
-export function getSettingTabs() {
-  const { t } = useI18n()
-
+export function getSettingTabs(t: Composer['t']) {
   return [
     {
       title: t('settingTabs.system.title'),
@@ -180,42 +186,16 @@ export function getSettingTabs() {
       description: t('settingTabs.subscribe.description'),
     },
     {
-      title: t('settingTabs.scheduler.title'),
-      icon: 'mdi-list-box',
-      tab: 'scheduler',
-      description: t('settingTabs.scheduler.description'),
-    },
-    {
-      title: t('settingTabs.cache.title'),
-      icon: 'mdi-database',
-      tab: 'cache',
-      description: t('settingTabs.cache.description'),
-    },
-    {
       title: t('settingTabs.notification.title'),
       icon: 'mdi-bell',
       tab: 'notification',
       description: t('settingTabs.notification.description'),
     },
-    {
-      title: t('settingTabs.words.title'),
-      icon: 'mdi-file-word-box',
-      tab: 'words',
-      description: t('settingTabs.words.description'),
-    },
-    {
-      title: t('settingTabs.about.title'),
-      icon: 'mdi-information',
-      tab: 'about',
-      description: t('settingTabs.about.description'),
-    },
   ]
 }
 
 // 获取电影订阅标签页
-export function getSubscribeMovieTabs() {
-  const { t } = useI18n()
-
+export function getSubscribeMovieTabs(t: Composer['t']) {
   return [
     {
       title: t('subscribeTabs.movie.mysub'),
@@ -231,9 +211,7 @@ export function getSubscribeMovieTabs() {
 }
 
 // 获取电视剧订阅标签页
-export function getSubscribeTvTabs() {
-  const { t } = useI18n()
-
+export function getSubscribeTvTabs(t: Composer['t']) {
   return [
     {
       title: t('subscribeTabs.tv.mysub'),
@@ -254,9 +232,7 @@ export function getSubscribeTvTabs() {
 }
 
 // 获取插件标签页
-export function getPluginTabs() {
-  const { t } = useI18n()
-
+export function getPluginTabs(t: Composer['t']) {
   return [
     {
       title: t('pluginTabs.installed'),
@@ -272,9 +248,7 @@ export function getPluginTabs() {
 }
 
 // 获取发现标签页
-export function getDiscoverTabs() {
-  const { t } = useI18n()
-
+export function getDiscoverTabs(t: Composer['t']) {
   return [
     {
       name: t('discoverTabs.themoviedb'),
@@ -295,9 +269,7 @@ export function getDiscoverTabs() {
 }
 
 // 获取工作流标签页
-export function getWorkflowTabs() {
-  const { t } = useI18n()
-
+export function getWorkflowTabs(t: Composer['t']) {
   return [
     {
       title: t('workflowTabs.list'),
@@ -310,4 +282,21 @@ export function getWorkflowTabs() {
       icon: 'mdi-share-variant',
     },
   ]
+}
+
+/** 插件侧栏分组（与后端 get_sidebar_nav 的 section 一致） */
+export type PluginSidebarSection = 'start' | 'discovery' | 'subscribe' | 'organize' | 'system'
+
+/**
+ * 将插件声明的 section 映射为与 getNavMenus 一致的已翻译 header（用于 NavMenu.header）
+ */
+export function pluginSidebarSectionToHeaderKey(section: string, t: Composer['t']): string {
+  const map: Record<string, string> = {
+    start: 'menu.start',
+    discovery: 'menu.discovery',
+    subscribe: 'menu.subscribe',
+    organize: 'menu.organize',
+    system: 'menu.system',
+  }
+  return t(map[section] ?? 'menu.system')
 }

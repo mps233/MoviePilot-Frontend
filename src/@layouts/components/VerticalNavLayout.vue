@@ -17,11 +17,43 @@ export default defineComponent({
     syncRef(isOverlayNavActive, isLayoutOverlayVisible)
 
     const scrollDistance = ref(window.scrollY)
+    const isDialogOpen = ref(false)
+    const wasScrolledBeforeDialog = ref(false)
+    let dialogObserver: MutationObserver | null = null
+
+    const handleScroll = () => {
+      scrollDistance.value = window.scrollY
+    }
+
+    // 监听弹窗状态变化
+    const checkDialogState = () => {
+      const wasDialogOpen = isDialogOpen.value
+      isDialogOpen.value = document.documentElement.classList.contains('v-overlay-scroll-blocked')
+
+      // 当弹窗刚打开时，记录当前的滚动状态
+      if (!wasDialogOpen && isDialogOpen.value) {
+        wasScrolledBeforeDialog.value = scrollDistance.value > 0
+      }
+    }
 
     onMounted(() => {
-      window.addEventListener('scroll', () => {
-        scrollDistance.value = window.scrollY
+      window.addEventListener('scroll', handleScroll)
+
+      // 初始检查弹窗状态
+      checkDialogState()
+
+      // 监听 DOM 变化以检测弹窗状态
+      dialogObserver = new MutationObserver(checkDialogState)
+      dialogObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['class'],
       })
+    })
+
+    onBeforeUnmount(() => {
+      window.removeEventListener('scroll', handleScroll)
+      dialogObserver?.disconnect()
+      dialogObserver = null
     })
 
     return () => {
@@ -88,9 +120,6 @@ export default defineComponent({
         },
       })
 
-      // 检查是否有弹窗打开（通过CSS类名判断）
-      const isDialogOpen = document.documentElement.classList.contains('dialog-scroll-locked')
-
       return h(
         'div',
         {
@@ -99,7 +128,7 @@ export default defineComponent({
             'layout-navbar-fixed',
             mdAndDown.value && 'layout-overlay-nav',
             route.meta.layoutWrapperClasses,
-            (scrollDistance.value || isDialogOpen) && 'window-scrolled',
+            (scrollDistance.value > 5 || (isDialogOpen.value && wasScrolledBeforeDialog.value)) && 'window-scrolled',
           ],
         },
         [verticalNav, h('div', { class: 'layout-content-wrapper' }, [navbar, main, footer]), layoutOverlay],
@@ -122,7 +151,7 @@ export default defineComponent({
 
 .layout-wrapper.layout-nav-type-vertical {
   // TODO(v2): Check why we need height in vertical nav & min-height in horizontal nav
-  block-size: 100%;
+  min-block-size: 100%;
 
   .layout-content-wrapper {
     display: flex;
@@ -204,7 +233,9 @@ export default defineComponent({
 
     .layout-page-content {
       // display: flex;
-      overflow: hidden;
+      // 使用 clip 替代 hidden，避免 Chrome 144+ 滚动锁定问题
+      overflow-x: clip;
+      overflow-y: auto;
 
       .page-content-container {
         inline-size: 100%;

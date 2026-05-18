@@ -3,7 +3,7 @@ import type { MediaServerLibrary } from '@/api/types'
 import plex from '@images/misc/plex.png'
 import emby from '@images/misc/emby.png'
 import jellyfin from '@images/misc/jellyfin.png'
-import trimemedia from '@images/logos/trimemedia.png'
+import { getLogoUrl } from '@/utils/imageUtils'
 import { openMediaServerWithAutoDetect } from '@/utils/appDeepLink'
 
 // 输入参数
@@ -33,14 +33,17 @@ function imageLoadHandler() {
 // 图片加载错误
 function imageErrorHandler() {
   imageError.value = true
+  imgUrl.value = getDefaultImage()
 }
 
 // 默认图片
 function getDefaultImage() {
   if (props.media?.server_type === 'plex') return plex
   else if (props.media?.server_type === 'emby') return emby
+  else if (props.media?.server_type === 'zspace') return getLogoUrl('zspace')
   else if (props.media?.server_type === 'jellyfin') return jellyfin
-  else if (props.media?.server_type === 'trimemedia') return trimemedia
+  else if (props.media?.server_type === 'trimemedia') return getLogoUrl('trimemedia')
+  else if (props.media?.server_type === 'ugreen') return getLogoUrl('ugreen')
   else return plex
 }
 
@@ -52,40 +55,46 @@ async function goPlay() {
 }
 
 // 生成图片代理路径
-function getImgUrl(url: string) {
-  if (!url) return getDefaultImage()
-  else return `${import.meta.env.VITE_API_BASE_URL}system/img/0?imgurl=${encodeURIComponent(url)}`
+function getImgUrl(url: string, use_cookies?: boolean) {
+  if (!url || imageError.value) return getDefaultImage()
+  let imgurl = `${import.meta.env.VITE_API_BASE_URL}system/img/0?imgurl=${encodeURIComponent(url)}`
+  if (use_cookies) {
+    imgurl += `&use_cookies=${encodeURIComponent(use_cookies)}`
+  }
+  return imgurl
 }
 
 // 根据多张图片生成媒体库封面
-async function drawImages(imageList: string[]) {
+async function drawImages(imageList: string[], use_cookies?: boolean) {
   // 图片
-  const IMAGES = imageList
+  const IMAGES = [...imageList]
   if (IMAGES.length === 0) return getDefaultImage()
 
   // 为所有图片添加system/img前缀
-  for (let i = 0; i < IMAGES.length; i++)
+  for (let i = 0; i < IMAGES.length; i++) {
     IMAGES[i] = `${import.meta.env.VITE_API_BASE_URL}system/img/0?imgurl=${encodeURIComponent(IMAGES[i])}`
+    if (use_cookies) {
+      IMAGES[i] += `&use_cookies=${encodeURIComponent(use_cookies)}`
+    }
+  }
 
   // canvas
   const canvas = canvasRef.value
   if (!canvas) return getDefaultImage()
 
   // 画布参数
-  const POSTER_WIDTH = (canvas.width - 32) / 4
-  const POSTER_HEIGHT = canvas.height * 0.75 - 8
-  const MARGIN_WIDTH = 4
-  const MARGIN_HEIGHT = 4
-  const REFLECTION_HEIGHT = POSTER_HEIGHT / 2
-  const REFLECTION_SHOW_HEIGHT = canvas.height / 4
+  const POSTER_WIDTH = (canvas.width - 40) / 4 // 左右边框8px + 3个间隔24px = 40px
+  const POSTER_HEIGHT = 256 // 上方海报高256
+  const MARGIN_WIDTH = 8 // 左右间隔为8
+  const MARGIN_HEIGHT = 4 // 海报和倒影之间的间隔为4
+  const REFLECTION_HEIGHT = canvas.height - POSTER_HEIGHT - MARGIN_HEIGHT // 下方倒影使用剩余全部高度
 
   // 获取画布上下文
   const ctx = canvas.getContext('2d')
   if (!ctx) return getDefaultImage()
 
-  // 设置背景色为黑色
-  ctx.fillStyle = '#000000'
-  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  // 设置背景色为透明
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
 
   // 绘制图片
   async function drawImageWithReflection(imgSrc: string, index: number) {
@@ -104,36 +113,27 @@ async function drawImages(imageList: string[]) {
     } catch (error) {
       console.error(error)
       ctx.fillStyle = '#e5e7eb'
-      ctx.fillRect(MARGIN_WIDTH * index + POSTER_WIDTH * (index - 1), MARGIN_HEIGHT, POSTER_WIDTH, POSTER_HEIGHT)
+      ctx.fillRect(MARGIN_WIDTH * index + POSTER_WIDTH * (index - 1), 0, POSTER_WIDTH, POSTER_HEIGHT)
       return
     }
 
     const x = MARGIN_WIDTH * index + POSTER_WIDTH * (index - 1)
-    const y = MARGIN_HEIGHT
+    const y = 0 // 海报紧贴顶部
 
     ctx.drawImage(img, x, y, POSTER_WIDTH, POSTER_HEIGHT)
 
     ctx.save()
     ctx.translate(0, canvas.height)
     ctx.scale(1, -1)
-    ctx.drawImage(
-      img,
-      0,
-      0,
-      img.width,
-      img.height,
-      x,
-      REFLECTION_SHOW_HEIGHT - REFLECTION_HEIGHT,
-      POSTER_WIDTH,
-      REFLECTION_HEIGHT,
-    )
+    ctx.drawImage(img, 0, 0, img.width, img.height, x, 0, POSTER_WIDTH, REFLECTION_HEIGHT)
 
-    const gradient = ctx.createLinearGradient(0, REFLECTION_SHOW_HEIGHT - REFLECTION_HEIGHT, 0, REFLECTION_HEIGHT)
+    const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height - (POSTER_HEIGHT + MARGIN_HEIGHT))
 
     gradient.addColorStop(0, 'rgba(0, 0, 0, 1)')
-    gradient.addColorStop(1, 'rgba(0, 0, 0, 0.3)')
+    gradient.addColorStop(1, 'rgba(0, 0, 0, 0.7)')
+    ctx.globalCompositeOperation = 'destination-out'
     ctx.fillStyle = gradient
-    ctx.fillRect(x, 0, POSTER_WIDTH, REFLECTION_SHOW_HEIGHT)
+    ctx.fillRect(x, 0, POSTER_WIDTH, REFLECTION_HEIGHT)
 
     ctx.restore()
   }
@@ -148,8 +148,8 @@ async function drawImages(imageList: string[]) {
 
 onMounted(async () => {
   if (props.media?.image_list && props.media?.image_list.length > 0)
-    imgUrl.value = await drawImages(props.media?.image_list || [])
-  else imgUrl.value = getImgUrl(props.media?.image || '')
+    imgUrl.value = await drawImages(props.media?.image_list || [], props.media?.use_cookies)
+  else imgUrl.value = getImgUrl(props.media?.image || '', props.media?.use_cookies)
 })
 </script>
 
@@ -166,7 +166,7 @@ onMounted(async () => {
         @click="goPlay"
       >
         <template #image>
-          <canvas ref="canvasRef" class="w-full h-full hidden" />
+          <canvas ref="canvasRef" width="640" height="360" class="w-full h-full hidden" />
           <VImg :src="imgUrl" aspect-ratio="2/3" cover @load="imageLoadHandler" @error="imageErrorHandler">
             <template #placeholder>
               <div class="w-full h-full">

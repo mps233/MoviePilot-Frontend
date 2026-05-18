@@ -1,14 +1,7 @@
 <script setup lang="ts">
 import api from '@/api'
-import douban from '@images/logos/douban.png'
-import github from '@images/logos/github.png'
-import slack from '@images/logos/slack.webp'
-import telegram from '@images/logos/telegram.webp'
-import tmdb from '@images/logos/tmdb.png'
-import wechat from '@images/logos/wechat.png'
-import fanart from '@images/logos/fanart.webp'
+import { getLogoUrl } from '@/utils/imageUtils'
 import tvdb from '@images/logos/thetvdb.jpeg'
-import python from '@images/logos/python.png'
 import { useI18n } from 'vue-i18n'
 
 // 国际化
@@ -21,164 +14,28 @@ interface Status {
   Doing?: string
 }
 
+interface TargetItem {
+  id: string
+  icon: string
+  name: string
+}
+
 interface Address {
+  id: string
   image: string
   name: string
-  url: string
-  proxy: boolean
   status: keyof Status
   time: string
   message: string
   btndisable: boolean
-  include?: string
 }
 
-// 测试集
-const targets = ref<Address[]>([
-  {
-    image: tmdb,
-    name: 'api.themoviedb.org',
-    url: 'https://api.themoviedb.org/3/movie/550?api_key={TMDBAPIKEY}',
-    proxy: true,
-    status: 'Normal',
-    time: '',
-    message: '',
-    btndisable: false,
-  },
-  {
-    image: tmdb,
-    name: 'api.tmdb.org',
-    url: 'https://api.tmdb.org/3/movie/550?api_key={TMDBAPIKEY}',
-    proxy: true,
-    status: 'Normal',
-    time: '',
-    message: t('netTest.notTested'),
-    btndisable: false,
-  },
-  {
-    image: tmdb,
-    name: 'www.themoviedb.org',
-    url: 'https://www.themoviedb.org',
-    proxy: true,
-    status: 'Normal',
-    time: '',
-    message: t('netTest.notTested'),
-    btndisable: false,
-  },
-  {
-    image: tvdb,
-    name: 'api.thetvdb.com',
-    url: 'https://api.thetvdb.com/series/81189',
-    proxy: true,
-    status: 'Normal',
-    time: '',
-    message: t('netTest.notTested'),
-    btndisable: false,
-  },
-  {
-    image: fanart,
-    name: 'webservice.fanart.tv',
-    url: 'https://webservice.fanart.tv',
-    proxy: true,
-    status: 'Normal',
-    time: '',
-    message: t('netTest.notTested'),
-    btndisable: false,
-  },
-  {
-    image: telegram,
-    name: 'api.telegram.org',
-    url: 'https://api.telegram.org',
-    proxy: true,
-    status: 'Normal',
-    time: '',
-    message: t('netTest.notTested'),
-    btndisable: false,
-  },
-  {
-    image: wechat,
-    name: 'qyapi.weixin.qq.com',
-    url: 'https://qyapi.weixin.qq.com/cgi-bin/gettoken',
-    proxy: false,
-    status: 'Normal',
-    time: '',
-    message: t('netTest.notTested'),
-    btndisable: false,
-  },
-  {
-    image: douban,
-    name: 'frodo.douban.com',
-    url: 'https://frodo.douban.com',
-    proxy: false,
-    status: 'Normal',
-    time: '',
-    message: t('netTest.notTested'),
-    btndisable: false,
-  },
-  {
-    image: slack,
-    name: 'slack.com',
-    url: 'https://slack.com',
-    proxy: false,
-    status: 'Normal',
-    time: '',
-    message: t('netTest.notTested'),
-    btndisable: false,
-  },
-  {
-    image: python,
-    name: 'pypi.org',
-    url: '{PIP_PROXY}rsa/',
-    proxy: true,
-    status: 'Normal',
-    time: '',
-    message: t('netTest.notTested'),
-    btndisable: false,
-    include: 'pypi:repository-version',
-  },
-  {
-    image: github,
-    name: 'github.com',
-    url: '{GITHUB_PROXY}https://github.com/jxxghp/MoviePilot/blob/v2/README.md',
-    proxy: true,
-    status: 'Normal',
-    time: '',
-    message: t('netTest.notTested'),
-    btndisable: false,
-    include: 'MoviePilot',
-  },
-  {
-    image: github,
-    name: 'codeload.github.com',
-    url: 'https://codeload.github.com',
-    proxy: true,
-    status: 'Normal',
-    time: '',
-    message: t('netTest.notTested'),
-    btndisable: false,
-  },
-  {
-    image: github,
-    name: 'api.github.com',
-    url: 'https://api.github.com',
-    proxy: true,
-    status: 'Normal',
-    time: '',
-    message: t('netTest.notTested'),
-    btndisable: false,
-  },
-  {
-    image: github,
-    name: 'raw.githubusercontent.com',
-    url: '{GITHUB_PROXY}https://raw.githubusercontent.com/jxxghp/MoviePilot/v2/README.md',
-    proxy: true,
-    status: 'Normal',
-    time: '',
-    message: t('netTest.notTested'),
-    btndisable: false,
-    include: 'MoviePilot',
-  },
-])
+function resolveTargetImage(icon: string) {
+  if (icon === 'tvdb') return tvdb
+  return getLogoUrl(icon)
+}
+
+const targets = ref<Address[]>([])
 
 const resolveStatusColor: Status = {
   OK: 'success',
@@ -188,15 +45,38 @@ const resolveStatusColor: Status = {
 }
 
 const abortControllers = new Set<AbortController>()
-const isUnmounting = ref(false);
+const isUnmounting = ref(false)
+
+async function loadTargets() {
+  // 测试项由后端下发，前端只负责展示，避免再把可测试目标和校验规则留在客户端。
+  const result: { [key: string]: any } = await api.get('system/nettest/targets')
+  if (!result.success || !Array.isArray(result.data)) {
+    targets.value = []
+    return
+  }
+
+  targets.value = result.data.map((item: TargetItem) => ({
+    id: item.id,
+    image: resolveTargetImage(item.icon),
+    name: item.name,
+    status: 'Normal',
+    time: '',
+    message: t('netTest.notTested'),
+    btndisable: false,
+  }))
+}
 
 // 调用API测试网络连接
 async function netTest(index: number) {
+  const target = targets.value[index]
+  if (!target) return
+
+  // 页面切换时需要主动中止请求，否则自动轮询中的旧请求会回写已卸载页面状态。
+  const abortController = new AbortController()
+  abortControllers.add(abortController)
+
   try {
-    const abortController = new AbortController()
-    abortControllers.add(abortController)
     const { signal } = abortController
-    const target = targets.value[index]
 
     target.btndisable = true
     target.status = 'Doing'
@@ -204,14 +84,10 @@ async function netTest(index: number) {
 
     const result: { [key: string]: any } = await api.get('system/nettest', {
       params: {
-        url: target.url,
-        proxy: target.proxy,
-        include: target.include,
+        target_id: target.id,
       },
       signal,
     })
-
-    abortControllers.delete(abortController)
 
     if (result.success) {
       target.status = 'OK'
@@ -223,28 +99,35 @@ async function netTest(index: number) {
     target.time = result.data?.time
     target.btndisable = false
   } catch (error) {
-    console.error(error)
+    if (!isUnmounting.value) {
+      target.status = 'Fail'
+      target.message = error instanceof Error ? error.message : t('netTest.notTested')
+      target.btndisable = false
+    }
+  } finally {
+    abortControllers.delete(abortController)
   }
 }
 
 // 加载时测试所有连接
 onMounted(async () => {
-  isUnmounting.value = false;
-  for (let i = 0; !isUnmounting.value && i < targets.value.length; i++)
-    await netTest(i)
+  isUnmounting.value = false
+  await loadTargets()
+  // 逐个串行测试，避免同时触发过多外部请求导致结果受限流或代理抖动影响。
+  for (let i = 0; !isUnmounting.value && i < targets.value.length; i++) await netTest(i)
 })
 onBeforeUnmount(() => {
-  isUnmounting.value = true;
+  isUnmounting.value = true
   for (const controller of abortControllers) {
     controller.abort()
   }
   abortControllers.clear()
-});
+})
 </script>
 
 <template>
   <VList lines="two" rounded>
-    <template v-for="(target, index) of targets" :key="target.name">
+    <template v-for="(target, index) of targets" :key="target.id">
       <VListItem>
         <template #prepend>
           <VAvatar :image="target.image" />

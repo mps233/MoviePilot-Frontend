@@ -3,19 +3,20 @@ import type { Message } from '@/api/types'
 import MessageCard from '@/components/cards/MessageCard.vue'
 import api from '@/api'
 import { useI18n } from 'vue-i18n'
-import { useBackgroundOptimization } from '@/composables/useBackgroundOptimization'
+import { useBackground } from '@/composables/useBackground'
 
 // 国际化
 const { t } = useI18n()
-const { useSSE } = useBackgroundOptimization()
-
-// 定义事件
-const emit = defineEmits(['scroll'])
+const { useSSE } = useBackground()
 
 // 消息列表
 const messages = ref<Message[]>([])
 // 当前页数据
 const currData = ref<Message[]>([])
+
+// 已加载消息的签名集合
+// 使用消息内容签名去重，避免仅按秒级时间戳判断时误吞同一秒内的不同消息。
+const messageKeys = new Set<string>()
 
 // 是否完成加载
 const isLoaded = ref(false)
@@ -29,27 +30,188 @@ const page = ref(1)
 // 存量消息最新时间
 const lastTime = ref('')
 
+// 消息列表滚动容器
+const messageListRef = ref<any>(null)
+
+// 自动滚动状态
+const shouldAutoScroll = ref(true)
+const isSyncingScroll = ref(false)
+
+const MESSAGE_AUTO_SCROLL_THRESHOLD = 64
+
+let scrollTimer: number | undefined
+let scrollReleaseTimer: number | undefined
+
+// 获取消息时间
+function getMessageTime(message: Message) {
+  return message.reg_time || message.date || ''
+}
+
+// 生成消息签名
+function getMessageKey(message: Message) {
+  return [
+    message.action ?? '',
+    message.userid ?? '',
+    message.reg_time ?? '',
+    message.date ?? '',
+    message.title ?? '',
+    message.text ?? '',
+    message.image ?? '',
+    message.link ?? '',
+    message.note ?? '',
+  ].join('::')
+}
+
+// 排序消息列表，确保最新消息始终位于底部
+function sortMessages(items: Message[]) {
+  return [...items].sort((a, b) => compareTime(getMessageTime(a), getMessageTime(b)))
+}
+
+// 记录最新消息时间
+function updateLastTime(message: Message) {
+  const messageTime = getMessageTime(message)
+  if (messageTime && compareTime(messageTime, lastTime.value) > 0) {
+    lastTime.value = messageTime
+  }
+}
+
+function getScrollContainer() {
+  const container = messageListRef.value?.$el ?? messageListRef.value
+
+  return container instanceof HTMLElement ? container : null
+}
+
+function isNearBottom(container: HTMLElement) {
+  const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight
+
+  return distanceFromBottom <= Math.max(MESSAGE_AUTO_SCROLL_THRESHOLD, container.clientHeight / 3)
+}
+
+function updateAutoScrollState() {
+  const container = getScrollContainer()
+  if (!container || isSyncingScroll.value) {
+    return
+  }
+
+  shouldAutoScroll.value = isNearBottom(container)
+}
+
+function handleScroll() {
+  updateAutoScrollState()
+}
+
+function bindScrollListener() {
+  const container = getScrollContainer()
+  if (!container) {
+    return
+  }
+
+  container.removeEventListener('scroll', handleScroll)
+  container.addEventListener('scroll', handleScroll, { passive: true })
+  updateAutoScrollState()
+}
+
+function unbindScrollListener() {
+  getScrollContainer()?.removeEventListener('scroll', handleScroll)
+}
+
+function scrollContainerToEnd() {
+  const container = getScrollContainer()
+  if (!container) {
+    return
+  }
+
+  isSyncingScroll.value = true
+  container.scrollTop = container.scrollHeight
+
+  requestAnimationFrame(() => {
+    const latestContainer = getScrollContainer()
+    if (!latestContainer) {
+      isSyncingScroll.value = false
+      return
+    }
+
+    latestContainer.scrollTop = latestContainer.scrollHeight
+    shouldAutoScroll.value = true
+
+    if (scrollReleaseTimer) {
+      window.clearTimeout(scrollReleaseTimer)
+    }
+
+    scrollReleaseTimer = window.setTimeout(() => {
+      isSyncingScroll.value = false
+      updateAutoScrollState()
+    }, 80)
+  })
+}
+
+function requestScrollToEnd(force = false) {
+  if (!force && !shouldAutoScroll.value) {
+    return
+  }
+
+  if (scrollTimer) {
+    window.clearTimeout(scrollTimer)
+  }
+
+  scrollTimer = window.setTimeout(() => {
+    nextTick(() => {
+      requestAnimationFrame(() => {
+        scrollContainerToEnd()
+      })
+    })
+  }, force ? 0 : 80)
+}
+
+function forceScrollToEnd() {
+  requestScrollToEnd(true)
+}
+
+// 合并消息到当前列表
+function mergeMessages(items: Message[]) {
+  let hasNewMessage = false
+
+  for (const item of sortMessages(items)) {
+    const messageKey = getMessageKey(item)
+    if (messageKeys.has(messageKey)) {
+      continue
+    }
+
+    messageKeys.add(messageKey)
+    messages.value.push(item)
+    updateLastTime(item)
+    hasNewMessage = true
+  }
+
+  if (hasNewMessage) {
+    messages.value = sortMessages(messages.value)
+  }
+
+  return hasNewMessage
+}
+
 // SSE消息处理函数
 function handleSSEMessage(event: MessageEvent) {
   const message = event.data
   if (message) {
     const object = JSON.parse(message)
-    // 使用reg_time或date字段进行比较
-    const messageTime = object.reg_time || object.date
-    if (compareTime(messageTime, lastTime.value) <= 0) return
-    messages.value.push(object)
-    nextTick(() => {
-      emit('scroll') // 新消息到达时触发智能滚动
-    })
+    if (mergeMessages([object])) {
+      requestScrollToEnd() // 新消息到达时触发智能滚动
+    }
   }
 }
 
-// 使用优化的SSE连接
-useSSE(`${import.meta.env.VITE_API_BASE_URL}system/message?role=user`, handleSSEMessage, 'message-view', {
-  backgroundCloseDelay: 5000,
-  reconnectDelay: 3000,
-  maxReconnectAttempts: 3,
-})
+// 使用SSE连接
+const { manager, isConnected } = useSSE(
+  `${import.meta.env.VITE_API_BASE_URL}system/message?role=user`,
+  handleSSEMessage,
+  'message-view',
+  {
+    backgroundCloseDelay: 5000,
+    reconnectDelay: 3000,
+    maxReconnectAttempts: 3,
+  },
+)
 
 // 调用API加载存量消息
 async function loadMessages({ done }: { done: any }) {
@@ -70,31 +232,11 @@ async function loadMessages({ done }: { done: any }) {
     // 已加载过
     isLoaded.value = true
     if (currData.value.length > 0) {
-      // 按时间排序，确保最新的消息在最后
-      currData.value.sort((a, b) => {
-        const timeA = a.reg_time || a.date || ''
-        const timeB = b.reg_time || b.date || ''
-        return compareTime(timeA, timeB)
-      })
-
-      // 取最后一条时间为存量消息最新时间
-      const lastMessage = currData.value[currData.value.length - 1]
-      lastTime.value = lastMessage.reg_time || lastMessage.date || ''
-
-      // 合并数据并重新排序
-      const allMessages = [...currData.value, ...messages.value]
-      allMessages.sort((a, b) => {
-        const timeA = a.reg_time || a.date || ''
-        const timeB = b.reg_time || b.date || ''
-        return compareTime(timeA, timeB)
-      })
-      messages.value = allMessages
+      const hasNewMessage = mergeMessages(currData.value)
 
       // 首次加载时滚动到底部
-      if (page.value === 1) {
-        nextTick(() => {
-          emit('scroll')
-        })
+      if (page.value === 1 && hasNewMessage) {
+        requestScrollToEnd(true)
       }
       // 页码+1
       page.value++
@@ -104,12 +246,29 @@ async function loadMessages({ done }: { done: any }) {
       // 没有新数据
       done('empty')
     }
-    // 取消加载中
-    loading.value = false
   } catch (error) {
     console.error('加载消息失败:', error)
-    loading.value = false
     done('error')
+  } finally {
+    loading.value = false
+  }
+}
+
+// 主动刷新最新一页消息，作为SSE偶发丢流时的兜底
+async function refreshLatestMessages() {
+  try {
+    const latestMessages = (await api.get('message/web', {
+      params: {
+        page: 1,
+        size: 20,
+      },
+    })) as Message[]
+
+    if (mergeMessages(latestMessages)) {
+      requestScrollToEnd()
+    }
+  } catch (error) {
+    console.error('刷新最新消息失败:', error)
   }
 }
 
@@ -142,19 +301,58 @@ function compareTime(time1: string, time2: string) {
 
 // 图片加载完成时触发智能滚动
 function handleImageLoad() {
-  emit('scroll')
+  requestScrollToEnd()
 }
 
+// 暂停SSE连接
+function pauseSSE() {
+  if (manager) {
+    manager.removeMessageListener('message-view')
+  }
+}
+
+// 恢复SSE连接
+function resumeSSE() {
+  if (manager) {
+    // 先移除再重建监听，确保恢复时拿到一条新的SSE连接。
+    manager.removeMessageListener('message-view')
+    manager.addMessageListener('message-view', handleSSEMessage)
+  }
+
+  refreshLatestMessages()
+}
+
+// 暴露方法给父组件
+defineExpose({
+  pauseSSE,
+  resumeSSE,
+  refreshLatestMessages,
+  forceScrollToEnd,
+})
+
 onMounted(() => {
-  // 组件挂载后触发一次滚动事件
   nextTick(() => {
-    emit('scroll')
+    bindScrollListener()
+    requestScrollToEnd(true)
   })
+})
+
+onBeforeUnmount(() => {
+  if (scrollTimer) {
+    window.clearTimeout(scrollTimer)
+  }
+
+  if (scrollReleaseTimer) {
+    window.clearTimeout(scrollReleaseTimer)
+  }
+
+  unbindScrollListener()
 })
 </script>
 
 <template>
   <VInfiniteScroll
+    ref="messageListRef"
     :mode="!isLoaded ? 'intersect' : 'manual'"
     side="start"
     :items="messages"
@@ -166,17 +364,19 @@ onMounted(() => {
       <LoadingBanner />
     </template>
     <template #empty> {{ t('message.noMoreData') }} </template>
-    <div>
-      <div
-        v-for="(msg, index) in messages"
-        :key="index"
-        class="chat-group d-flex mt-5 mb-8"
-        :class="msg.action == 1 ? 'flex-row align-start' : 'flex-row-reverse align-end'"
-      >
-        <div class="d-inline-flex flex-column" :class="msg.action == 1 ? 'align-start' : 'align-end'">
-          <MessageCard :message="msg" @imageload="handleImageLoad" />
+    <VVirtualScroll renderless :items="messages" :item-height="160">
+      <template #default="{ item, index, itemRef }">
+        <div
+          :ref="itemRef"
+          :key="getMessageKey(item) || index"
+          class="chat-group d-flex mt-5 mb-8"
+          :class="item.action == 1 ? 'flex-row align-start' : 'flex-row-reverse align-end'"
+        >
+          <div class="d-inline-flex flex-column" :class="item.action == 1 ? 'align-start' : 'align-end'">
+            <MessageCard :message="item" @imageload="handleImageLoad" />
+          </div>
         </div>
-      </div>
-    </div>
+      </template>
+    </VVirtualScroll>
   </VInfiniteScroll>
 </template>

@@ -91,8 +91,10 @@ const userForm = ref<ExtendedUser>({
   },
   settings: {
     wechat_userid: null,
+    wechatclawbot_userid: null,
     telegram_userid: null,
     slack_userid: null,
+    discord_userid: null,
     vocechat_userid: null,
     synologychat_userid: null,
   },
@@ -198,6 +200,7 @@ async function fetchUserInfo() {
     userForm.value = await api.get(`user/${props.username}`)
     if (userForm.value) {
       userForm.value.avatar = userForm.value.avatar || avatar1
+      userForm.value.nickname = userForm.value.settings?.nickname ?? ''
       currentAvatar.value = userForm.value.avatar
       currentUserName.value = userForm.value.name
       userName.value = userForm.value.name
@@ -272,12 +275,10 @@ async function updateUser() {
   }
 
   // 将nickname保存到settings中，后端可以直接处理JSON对象
-  if (userForm.value.nickname) {
-    if (!userForm.value.settings) {
-      userForm.value.settings = {}
-    }
-    userForm.value.settings.nickname = userForm.value.nickname
+  if (!userForm.value.settings) {
+    userForm.value.settings = {}
   }
+  userForm.value.settings.nickname = userForm.value.nickname ?? ''
 
   const oldUserName = userForm.value.name
   userForm.value.name = currentUserName.value
@@ -366,7 +367,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <DialogWrapper scrollable max-width="40rem" :fullscreen="!display.mdAndUp.value">
+  <VDialog scrollable max-width="40rem" :fullscreen="!display.mdAndUp.value">
     <VCard>
       <VCardItem :class="props.oper === 'add' ? 'py-3' : 'py-2'">
         <template #prepend>
@@ -505,6 +506,15 @@ onMounted(() => {
             </VCol>
             <VCol cols="12" md="6">
               <VTextField
+                v-model="userForm.settings.wechatclawbot_userid"
+                density="comfortable"
+                clearable
+                :label="t('dialog.userAddEdit.wechatClawBot')"
+                prepend-inner-icon="mdi-robot-happy-outline"
+              />
+            </VCol>
+            <VCol cols="12" md="6">
+              <VTextField
                 v-model="userForm.settings.telegram_userid"
                 density="comfortable"
                 clearable
@@ -519,6 +529,15 @@ onMounted(() => {
                 clearable
                 :label="t('dialog.userAddEdit.slack')"
                 prepend-inner-icon="mdi-slack"
+              />
+            </VCol>
+            <VCol cols="12" md="6">
+              <VTextField
+                v-model="userForm.settings.discord_userid"
+                density="comfortable"
+                clearable
+                :label="t('dialog.userAddEdit.discord')"
+                prepend-inner-icon="mdi-discord"
               />
             </VCol>
             <VCol cols="12" md="6">
@@ -619,5 +638,5 @@ onMounted(() => {
         </VBtn>
       </VCardActions>
     </VCard>
-  </DialogWrapper>
+  </VDialog>
 </template>

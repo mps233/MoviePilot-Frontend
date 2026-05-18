@@ -2,16 +2,17 @@
 import { formatDateDifference } from '@core/utils/formatters'
 import { SystemNotification } from '@/api/types'
 import { useI18n } from 'vue-i18n'
-import { useBackgroundOptimization } from '@/composables/useBackgroundOptimization'
+import { useBackground } from '@/composables/useBackground'
 
 const { t } = useI18n()
-const { useDelayedSSE } = useBackgroundOptimization()
+const { useDelayedSSE } = useBackground()
 
 // 是否有新消息
 const hasNewMessage = ref(false)
 
 // 通知列表
 const notificationList = ref<SystemNotification[]>([])
+const MAX_NOTIFICATIONS = 100
 
 // 弹窗
 const appsMenu = ref(false)
@@ -31,11 +32,14 @@ function handleMessage(event: MessageEvent) {
   if (event.data) {
     const noti: SystemNotification = JSON.parse(event.data)
     notificationList.value.unshift(noti)
+    if (notificationList.value.length > MAX_NOTIFICATIONS) {
+      notificationList.value.length = MAX_NOTIFICATIONS
+    }
     hasNewMessage.value = true
   }
 }
 
-// 使用优化的SSE连接，延迟3秒启动，避免认证问题
+// 延迟3秒启动SSE连接，避免认证信息尚未准备好。
 useDelayedSSE(
   `${import.meta.env.VITE_API_BASE_URL}system/message`,
   handleMessage,

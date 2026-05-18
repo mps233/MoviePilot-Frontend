@@ -1,26 +1,33 @@
 <script lang="ts" setup>
-import draggable from 'vuedraggable'
 import api from '@/api'
 import type { Site, SiteUserData } from '@/api/types'
 import SiteCard from '@/components/cards/SiteCard.vue'
 import NoDataFound from '@/components/NoDataFound.vue'
-import SiteAddEditDialog from '@/components/dialog/SiteAddEditDialog.vue'
-import SiteStatisticsDialog from '@/components/dialog/SiteStatisticsDialog.vue'
-import { useDisplay } from 'vuetify'
+import ProgressiveCardGrid from '@/components/misc/ProgressiveCardGrid.vue'
 import { useDynamicButton } from '@/composables/useDynamicButton'
 import { useI18n } from 'vue-i18n'
 import { usePWA } from '@/composables/usePWA'
+import { useToast } from 'vue-toastification'
+import { useKeepAliveRefresh, type KeepAliveRefreshContext } from '@/composables/useKeepAliveRefresh'
+import { openSharedDialog } from '@/composables/useSharedDialog'
 
 // 国际化
 const { t } = useI18n()
 
+// 提示框
+const $toast = useToast()
+
 // 路由
 const route = useRoute()
 
-// APP
-const display = useDisplay()
-// PWA模式检测
+// APP 模式检测
 const { appMode } = usePWA()
+
+// 拖拽排序和站点弹窗都不是站点列表首屏必需，打开对应功能时再加载。
+const Draggable = defineAsyncComponent(() => import('vuedraggable').then(module => module.default))
+const SiteAddEditDialog = defineAsyncComponent(() => import('@/components/dialog/SiteAddEditDialog.vue'))
+const SiteStatisticsDialog = defineAsyncComponent(() => import('@/components/dialog/SiteStatisticsDialog.vue'))
+const SiteImportDialog = defineAsyncComponent(() => import('@/components/dialog/SiteImportDialog.vue'))
 
 // 站点列表
 const siteList = ref<Site[]>([])
@@ -37,11 +44,7 @@ const isRefreshed = ref(false)
 // 是否加载中
 const loading = ref(false)
 
-// 新增站点对话框
-const siteAddDialog = ref(false)
-
-// 统计信息对话框
-const siteStatsDialog = ref(false)
+const sortMode = ref(false)
 
 // 筛选相关
 const filterMenu = ref(false)
@@ -49,7 +52,7 @@ const filterOption = ref('all') // all, active, inactive, connected, slow, faile
 
 // 筛选选项
 const filterOptions = computed(() => [
-  { value: 'all', label: t('common.all'), icon: 'mdi-format-list-bulleted' },
+  { value: 'all', label: t('common.all'), icon: 'mdi-filter-multiple-outline' },
   { value: 'active', label: t('common.active'), icon: 'mdi-check-circle', color: 'success' },
   { value: 'inactive', label: t('common.inactive'), icon: 'mdi-stop-circle', color: 'error' },
   { value: 'connected', label: t('site.connectionNormal'), icon: 'mdi-wifi', color: 'success' },
@@ -88,22 +91,48 @@ const draggableSiteList = computed({
   },
 })
 
+const siteUserDataMap = computed<Record<string, SiteUserData | undefined>>(() => {
+  const map: Record<string, SiteUserData | undefined> = {}
+
+  userDataList.value.forEach(userData => {
+    if (userData.domain) {
+      map[userData.domain] = userData
+    }
+  })
+
+  return map
+})
+
+const canDragSort = computed(() => sortMode.value && filterOption.value === 'all')
+const shouldVirtualizeList = computed(() => !sortMode.value)
+
 // 当前筛选选项的显示信息
 const currentFilter = computed(() => {
   return filterOptions.value.find(option => option.value === filterOption.value)
 })
 
 // 获取站点列表数据
-async function fetchData() {
+async function fetchData(context: KeepAliveRefreshContext = {}) {
+  const showLoading = !context.silent || !isRefreshed.value
+
   try {
-    loading.value = true
-    siteList.value = await api.get('site/')
-    loading.value = false
+    if (showLoading) {
+      loading.value = true
+    }
+
+    const [sites] = await Promise.all([
+      api.get<Site[], Site[]>('site/'),
+      // 站点统计在列表请求期间并行预取，减少刷新时卡片分两轮明显重绘。
+      fetchSiteStats(),
+    ])
+    siteList.value = sites
     isRefreshed.value = true
-    // 获取站点列表后，获取统计数据
-    await fetchSiteStats()
   } catch (error) {
     console.error(error)
+  } finally {
+    if (showLoading) {
+      loading.value = false
+    }
   }
 }
 
@@ -174,16 +203,6 @@ async function savaSitesPriority() {
   }
 }
 
-// 根据站点ID获取站点数据
-function getUserData(domain: string) {
-  return userDataList.value.find(userData => userData.domain === domain)
-}
-
-// 根据站点域名获取统计数据
-function getSiteStats(domain: string) {
-  return siteStatsList.value[domain] || {}
-}
-
 // 处理站点统计数据刷新请求
 async function handleRefreshStats(domain?: string) {
   if (domain) {
@@ -202,7 +221,6 @@ async function handleRefreshStats(domain?: string) {
 
 // 更新站点事件时
 function onSiteSave() {
-  siteAddDialog.value = false
   fetchData()
 }
 
@@ -212,59 +230,158 @@ function selectFilter(value: string) {
   filterMenu.value = false
 }
 
+function toggleSortMode() {
+  sortMode.value = !sortMode.value
+}
+
+function openSiteAddDialog() {
+  openSharedDialog(
+    SiteAddEditDialog,
+    { oper: 'add' },
+    {
+      save: onSiteSave,
+    },
+    { closeOn: ['close', 'save'] },
+  )
+}
+
+function openSiteImportDialog() {
+  openSharedDialog(
+    SiteImportDialog,
+    {},
+    {
+      'import-success': fetchData,
+    },
+    { closeOn: ['update:modelValue'] },
+  )
+}
+
+function openSiteStatisticsDialog() {
+  openSharedDialog(SiteStatisticsDialog, { sites: siteList.value }, {}, { closeOn: ['update:modelValue'] })
+}
+
+// 导出站点数据
+async function exportSites() {
+  try {
+    // 获取所有站点数据
+    const sites: Site[] = await api.get('site/')
+
+    // 创建导出数据，只包含必要的字段
+    const exportData = sites.map((site: Site) => ({
+      name: site.name,
+      domain: site.domain,
+      url: site.url,
+      rss: site.rss,
+      downloader: site.downloader,
+      cookie: site.cookie,
+      apikey: site.apikey,
+      token: site.token,
+      ua: site.ua,
+      proxy: site.proxy,
+      filter: site.filter,
+      render: site.render,
+      public: site.public,
+      note: site.note,
+      timeout: site.timeout,
+      limit_interval: site.limit_interval,
+      limit_count: site.limit_count,
+      limit_seconds: site.limit_seconds,
+      is_active: site.is_active,
+      pri: site.pri,
+    }))
+
+    // 创建Blob对象
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
+
+    // 创建下载链接
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `sites_export_${new Date().toISOString().split('T')[0]}.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+
+    // 显示成功提示
+    $toast.success(t('site.messages.exportSuccess'))
+  } catch (error) {
+    console.error('Export sites failed:', error)
+    $toast.error(t('site.messages.exportFailed'))
+  }
+}
+
 // 加载时获取数据
 onBeforeMount(() => {
   fetchData()
   fetchUserData()
 })
 
-onActivated(() => {
-  if (!loading.value) {
-    fetchData()
-    fetchUserData()
-  }
+useKeepAliveRefresh(async context => {
+  if (loading.value) return
+
+  await Promise.all([fetchData(context), fetchUserData()])
 })
+
+watch(
+  () => filterOption.value,
+  value => {
+    if (value !== 'all' && sortMode.value) {
+      sortMode.value = false
+    }
+  },
+  { immediate: true },
+)
+
+const shouldShowFloatingActions = computed(() => route.path === '/site' && isRefreshed.value)
+
+// App 模式下将站点操作收纳到 Footer 动态菜单中，和插件页保持一致。
+const siteDynamicMenuItems = computed(() => [
+  {
+    titleKey: 'site.actions.add',
+    icon: 'mdi-web-plus',
+    action: openSiteAddDialog,
+  },
+  {
+    titleKey: 'site.actions.import',
+    icon: 'mdi-import',
+    action: openSiteImportDialog,
+  },
+  {
+    titleKey: 'site.actions.export',
+    icon: 'mdi-export',
+    action: exportSites,
+  },
+  {
+    titleKey: 'site.statistics',
+    icon: 'mdi-chart-line',
+    action: openSiteStatisticsDialog,
+  },
+])
 
 // 使用动态按钮钩子
 useDynamicButton({
   icon: 'mdi-web-plus',
-  onClick: () => {
-    siteAddDialog.value = true
-  },
+  onClick: openSiteAddDialog,
+  menuItems: siteDynamicMenuItems,
+  show: computed(() => appMode.value && shouldShowFloatingActions.value),
 })
 </script>
 
 <template>
   <div class="card-list-container">
-    <!-- 页面标题和筛选按钮 -->
+    <!-- 页面标题和筛选/排序按钮 -->
     <div class="d-flex justify-space-between align-center mb-4">
-      <VPageContentTitle :title="t('navItems.siteManager')" class="mb-0" />
-      <!-- 右侧按钮组 -->
-      <div class="d-flex align-center gap-2">
-        <!-- 统计信息按钮 -->
-        <VBtn :icon="display.smAndDown.value" variant="text" color="info" @click="siteStatsDialog = true">
-          <VIcon icon="mdi-chart-line" />
-          <span v-if="!display.smAndDown.value" class="ml-2">
-            {{ t('site.statistics') }}
-          </span>
-        </VBtn>
+      <VPageContentTitle :title="t('navItems.siteManager')" class="my-0" style="margin-block: 0" />
+      <!-- 右侧按钮组：保留筛选和排序，其他页面动作移到 FAB -->
+      <div class="d-flex align-center gap-1">
         <!-- 筛选按钮 -->
         <VMenu v-model="filterMenu" offset-y :close-on-content-click="false" location="bottom end">
           <template #activator="{ props }">
-            <VBtn
-              v-bind="props"
-              :icon="display.smAndDown.value"
-              :variant="filterOption === 'all' ? 'text' : 'tonal'"
-              :color="currentFilter?.color"
-            >
+            <IconBtn v-bind="props" :variant="filterOption === 'all' ? 'text' : 'tonal'" :color="currentFilter?.color">
               <VIcon :icon="currentFilter?.icon || 'mdi-filter'" />
-              <span v-if="!display.smAndDown.value" class="ml-2">
-                {{ currentFilter?.label }}
-              </span>
-              <VIcon v-if="!display.smAndDown.value" icon="mdi-chevron-down" class="ml-1" />
-            </VBtn>
+            </IconBtn>
           </template>
-
           <!-- 筛选菜单 -->
           <VCard min-width="200">
             <VList class="px-2">
@@ -286,31 +403,63 @@ useDynamicButton({
             </VList>
           </VCard>
         </VMenu>
+        <!-- 排序按钮 -->
+        <IconBtn variant="text" :color="sortMode ? 'warning' : 'gray'" @click="toggleSortMode">
+          <VIcon icon="mdi-sort-variant" />
+        </IconBtn>
       </div>
     </div>
 
+    <VAlert v-if="sortMode" color="warning" variant="tonal" class="mb-4">
+      <div class="d-flex flex-wrap align-center justify-space-between gap-2">
+        <span>{{ t('common.sortModeHint') }}</span>
+        <VBtn variant="tonal" color="error" @click="sortMode = false">
+          {{ t('common.exit') }}
+        </VBtn>
+      </div>
+    </VAlert>
+
     <LoadingBanner v-if="!isRefreshed" class="mt-12" />
-    <draggable
-      v-if="draggableSiteList.length > 0"
+    <Draggable
+      v-if="draggableSiteList.length > 0 && canDragSort"
       v-model="draggableSiteList"
       @end="savaSitesPriority"
-      handle=".cursor-move"
       item-key="id"
       tag="div"
       :component-data="{ 'class': 'grid gap-4 grid-site-card px-2' }"
-      :disabled="filterOption !== 'all'"
     >
       <template #item="{ element }">
         <SiteCard
           :site="element"
-          :data="getUserData(element.domain)"
-          :stats="getSiteStats(element.domain)"
+          :data="siteUserDataMap[element.domain]"
+          :stats="siteStatsList[element.domain] || {}"
+          :sortable="true"
           @remove="fetchData"
           @update="fetchData"
           @refresh-stats="handleRefreshStats"
         />
       </template>
-    </draggable>
+    </Draggable>
+    <ProgressiveCardGrid
+      v-else-if="draggableSiteList.length > 0 && shouldVirtualizeList"
+      :items="draggableSiteList"
+      :get-item-key="item => item.id"
+      :min-item-width="256"
+      :estimated-item-height="168"
+      class="px-2"
+    >
+      <template #default="{ item }">
+        <SiteCard
+          :site="item"
+          :data="siteUserDataMap[item.domain]"
+          :stats="siteStatsList[item.domain] || {}"
+          :sortable="false"
+          @remove="fetchData"
+          @update="fetchData"
+          @refresh-stats="handleRefreshStats"
+        />
+      </template>
+    </ProgressiveCardGrid>
   </div>
   <NoDataFound
     v-if="draggableSiteList.length === 0 && isRefreshed"
@@ -320,27 +469,38 @@ useDynamicButton({
   />
   <!-- 新增站点按钮 -->
   <Teleport to="body" v-if="route.path === '/site'">
-    <VFab
-      v-if="isRefreshed && !appMode"
-      icon="mdi-web-plus"
-      location="bottom"
-      size="x-large"
-      fixed
-      app
-      appear
-      @click="siteAddDialog = true"
-      :class="{ 'mb-12': appMode }"
-    />
+    <div v-if="shouldShowFloatingActions && !appMode" class="compact-fab-stack">
+      <VFab
+        icon="mdi-chart-line"
+        color="info"
+        variant="tonal"
+        appear
+        class="compact-fab compact-fab--secondary"
+        @click="openSiteStatisticsDialog"
+      />
+      <VFab
+        icon="mdi-export"
+        color="warning"
+        variant="tonal"
+        appear
+        class="compact-fab compact-fab--secondary"
+        @click="exportSites"
+      />
+      <VFab
+        icon="mdi-import"
+        color="success"
+        variant="tonal"
+        appear
+        class="compact-fab compact-fab--secondary"
+        @click="openSiteImportDialog"
+      />
+      <VFab
+        icon="mdi-web-plus"
+        color="primary"
+        appear
+        class="compact-fab compact-fab--primary"
+        @click="openSiteAddDialog"
+      />
+    </div>
   </Teleport>
-  <!-- 新增站点弹窗 -->
-  <SiteAddEditDialog
-    v-if="siteAddDialog"
-    v-model="siteAddDialog"
-    oper="add"
-    @save="onSiteSave"
-    @close="siteAddDialog = false"
-  />
-
-  <!-- 统计信息弹窗 -->
-  <SiteStatisticsDialog v-if="siteStatsDialog" v-model="siteStatsDialog" :sites="siteList" />
 </template>

@@ -48,6 +48,7 @@ const router = createRouter({
           path: '/resource',
           component: () => import('../pages/resource.vue'),
           meta: {
+            keepAlive: true,
             requiresAuth: true,
           },
         },
@@ -56,6 +57,7 @@ const router = createRouter({
           component: () => import('../pages/subscribe.vue'),
           meta: {
             keepAlive: true,
+            keepAliveKey: 'subscribe-movie',
             requiresAuth: true,
             subType: '电影',
           },
@@ -65,6 +67,7 @@ const router = createRouter({
           component: () => import('../pages/subscribe.vue'),
           meta: {
             keepAlive: true,
+            keepAliveKey: 'subscribe-tv',
             requiresAuth: true,
             subType: '电视剧',
           },
@@ -73,7 +76,6 @@ const router = createRouter({
           path: '/subscribe-share',
           component: () => import('../pages/subscribe-share.vue'),
           meta: {
-            keepAlive: true,
             requiresAuth: true,
           },
         },
@@ -97,6 +99,7 @@ const router = createRouter({
           path: '/downloading',
           component: () => import('../pages/downloading.vue'),
           meta: {
+            keepAlive: true,
             requiresAuth: true,
           },
         },
@@ -104,6 +107,7 @@ const router = createRouter({
           path: '/history',
           component: () => import('../pages/history.vue'),
           meta: {
+            keepAlive: true,
             requiresAuth: true,
             hideFooter: true,
           },
@@ -141,9 +145,18 @@ const router = createRouter({
           },
         },
         {
+          path: '/plugin-app/:pluginId/:navKey?',
+          name: 'plugin-app',
+          component: () => import('../pages/plugin-app.vue'),
+          meta: {
+            requiresAuth: true,
+          },
+        },
+        {
           path: '/setting',
           component: () => import('../pages/setting.vue'),
           meta: {
+            keepAlive: true,
             requiresAuth: true,
           },
         },
@@ -152,7 +165,6 @@ const router = createRouter({
           component: () => import('../pages/browse.vue'),
           props: true,
           meta: {
-            keepAlive: true,
             requiresAuth: true,
           },
         },
@@ -161,7 +173,6 @@ const router = createRouter({
           component: () => import('../pages/credits.vue'),
           props: true,
           meta: {
-            keepAlive: true,
             requiresAuth: true,
           },
         },
@@ -170,7 +181,6 @@ const router = createRouter({
           component: () => import('../pages/person.vue'),
           props: true,
           meta: {
-            keepAlive: true,
             requiresAuth: true,
           },
         },
@@ -178,7 +188,6 @@ const router = createRouter({
           path: '/media',
           component: () => import('../pages/media.vue'),
           meta: {
-            keepAlive: true,
             requiresAuth: true,
           },
         },
@@ -195,6 +204,7 @@ const router = createRouter({
           path: '/apps',
           component: () => import('../pages/appcenter.vue'),
           meta: {
+            keepAlive: true,
             requiresAuth: true,
           },
         },
@@ -207,6 +217,13 @@ const router = createRouter({
         {
           path: 'login',
           component: () => import('../pages/login.vue'),
+        },
+        {
+          path: 'setup-wizard',
+          component: () => import('../pages/setup.vue'),
+          meta: {
+            requiresAuth: true,
+          },
         },
         {
           path: '/:pathMatch(.*)*',

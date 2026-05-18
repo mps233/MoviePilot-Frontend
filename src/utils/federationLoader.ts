@@ -30,6 +30,58 @@ async function fetchSingleRemoteModule(id: string): Promise<RemoteModule | null>
 }
 
 /**
+ * 将 nav_key 转为联邦暴露名的 Pascal 片段（如 settings -> Settings，my-tool -> MyTool）
+ */
+function navKeyToPascalSegment(navKey: string): string {
+  return navKey
+    .trim()
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join('')
+}
+
+/**
+ * 加载插件全页组件（支持同一插件多界面）。
+ *
+ * 解析顺序（nav_key 为 main 或空时）：
+ *   `AppPage` → `Page`
+ *
+ * 其它 nav_key（例如 settings、my_tool）：
+ *   `AppPage{Pascal}` → `AppPage` → `Page`
+ *   例：nav_key=settings → 尝试 `AppPageSettings`，再回退 `AppPage`、`Page`
+ *
+ * 也可在单个 `AppPage.vue` 内根据 `navKey` prop 分支渲染，无需多文件。
+ */
+export async function loadRemoteAppPageComponent(id: string, navKey: string = 'main') {
+  const raw = (navKey || 'main').trim()
+  const isMain = raw === '' || raw.toLowerCase() === 'main'
+
+  const candidateNames: string[] = []
+  if (isMain) {
+    candidateNames.push('AppPage', 'Page')
+  } else {
+    const pascal = navKeyToPascalSegment(raw)
+    if (pascal) {
+      candidateNames.push(`AppPage${pascal}`)
+    }
+    candidateNames.push('AppPage', 'Page')
+  }
+
+  let lastError: unknown
+  for (const name of candidateNames) {
+    try {
+      return await loadRemoteComponent(id, name)
+    } catch (error) {
+      lastError = error
+      console.debug(`[federation] 插件 ${id} 全页尝试 ./${name} 失败，回退下一候选`)
+    }
+  }
+  console.warn(`[federation] 插件 ${id} 全页均加载失败 (navKey=${raw})`, lastError)
+  throw lastError ?? new Error(`无法加载插件 ${id} 的全页组件`)
+}
+
+/**
  * 加载远程组件
  * @param id 远程模块ID
  * @param componentName 组件名称 (如 'Page')
@@ -80,9 +132,9 @@ async function fetchRemoteModules(): Promise<RemoteModule[]> {
  * @param modules 远程模块列表
  */
 function injectRemoteModule(module: RemoteModule): void {
-  // 从浏览器地址栏获取当前地址前缀
+  // 与 API 请求一致：使用 origin + pathname 作为前缀，子路径代理时 pathname 含 /mp 等
   const baseUrl = new URL(window.location.href)
-  // 环境变量
+  const pathBase = baseUrl.pathname.replace(/\/$/, '') || ''
   let apiBase = import.meta.env.VITE_API_BASE_URL
   if (apiBase.startsWith('/')) {
     apiBase = apiBase.slice(1)
@@ -90,8 +142,10 @@ function injectRemoteModule(module: RemoteModule): void {
   if (apiBase.endsWith('/')) {
     apiBase = apiBase.slice(0, -1)
   }
+  const pathWithoutLeadingSlash = module.url.startsWith('/') ? module.url.slice(1) : module.url
+  const remoteEntryUrl = `${baseUrl.origin}${pathBase}/${apiBase}/${pathWithoutLeadingSlash}`
   __federation_method_setRemote(module.id, {
-    url: () => Promise.resolve(`${baseUrl.origin}/${apiBase}${module.url}`),
+    url: () => Promise.resolve(remoteEntryUrl),
     format: 'esm',
     from: 'vite',
   })

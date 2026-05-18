@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import api from '@/api'
 import type { Plugin } from '@/api/types'
-import noImage from '@images/logos/plugin.png'
+import { getLogoUrl } from '@/utils/imageUtils'
 import { useI18n } from 'vue-i18n'
 import { useRecentPlugins } from '@/composables/useRecentPlugins'
+import { openSharedDialog } from '@/composables/useSharedDialog'
 import PluginDataDialog from '@/components/dialog/PluginDataDialog.vue'
 import { VCard } from 'vuetify/components'
 import { getDominantColor } from '@/@core/utils/image'
+import { disableBodyScroll, enableBodyScroll } from 'body-scroll-lock'
 
 // 国际化
 const { t } = useI18n()
@@ -63,10 +65,15 @@ const lastY = ref(0)
 const lastTime = ref(0)
 const velocity = ref(0)
 const startedFromBottomArea = ref(false)
+const quickAccessRef = ref<HTMLElement | { $el?: HTMLElement } | null>(null)
 
-// 插件弹窗相关状态
-const showPluginDataDialog = ref(false)
-const currentPlugin = ref<Plugin | null>(null)
+// Vuetify 组件 ref 在不同构建下可能返回组件实例，这里统一解析为真实 DOM 节点。
+function getQuickAccessElement() {
+  const element = quickAccessRef.value
+  if (!element) return null
+
+  return element instanceof HTMLElement ? element : element.$el ?? null
+}
 
 // 计算显示状态
 const isVisible = computed(() => {
@@ -136,8 +143,8 @@ const componentOpacity = computed(() => {
 
 // 计算插件图标路径
 function getPluginIcon(plugin: Plugin): string {
-  if (!plugin.plugin_icon) return noImage
-  if (pluginIconLoadError.value[plugin.id]) return noImage
+  if (!plugin.plugin_icon) return getLogoUrl('plugin')
+  if (pluginIconLoadError.value[plugin.id]) return getLogoUrl('plugin')
 
   // 如果是网络图片则使用代理后返回
   if (plugin?.plugin_icon?.startsWith('http'))
@@ -189,9 +196,15 @@ function handlePluginClick(plugin: Plugin) {
 
   emit('plugin-click', plugin)
 
-  // 设置当前插件并显示数据弹窗
-  currentPlugin.value = plugin
-  showPluginDataDialog.value = true
+  openSharedDialog(
+    PluginDataDialog,
+    {
+      plugin,
+      show_switch: false,
+    },
+    {},
+    { closeOn: ['close', 'update:modelValue'] },
+  )
 }
 
 // 关闭面板
@@ -199,10 +212,34 @@ function handleClose() {
   emit('close')
 }
 
-// 关闭插件数据弹窗
-function handleClosePluginDataDialog() {
-  showPluginDataDialog.value = false
-  currentPlugin.value = null
+// 管理滚动状态
+function manageScrollLock() {
+  if (isVisible.value) {
+    // 使用 nextTick 确保 DOM 已经更新
+    nextTick(() => {
+      const panelElement = getQuickAccessElement()
+      if (!panelElement) return
+
+      // 锁定整层快捷入口，只有插件列表内部允许惯性滚动，避免底部手势漏给首页背景。
+      disableBodyScroll(panelElement, {
+        allowTouchMove: el => Boolean((el as HTMLElement).closest('.quick-access-scroll')),
+      })
+
+      if (typeof document !== 'undefined') {
+        document.documentElement.classList.add('quick-access-scroll-locked')
+      }
+    })
+  } else {
+    // 恢复背景滚动
+    const panelElement = getQuickAccessElement()
+    if (panelElement) {
+      enableBodyScroll(panelElement)
+    }
+
+    if (typeof document !== 'undefined') {
+      document.documentElement.classList.remove('quick-access-scroll-locked')
+    }
+  }
 }
 
 // 监听可见性变化，加载数据
@@ -212,6 +249,9 @@ watch(
     if (visible) {
       fetchPluginsWithPage()
       loadRecentPlugins()
+      manageScrollLock()
+    } else {
+      manageScrollLock()
     }
   },
   { immediate: true },
@@ -221,6 +261,19 @@ onMounted(() => {
   if (isVisible.value) {
     fetchPluginsWithPage()
     loadRecentPlugins()
+    manageScrollLock()
+  }
+})
+
+// 组件卸载时确保恢复背景滚动
+onUnmounted(() => {
+  const panelElement = getQuickAccessElement()
+  if (panelElement) {
+    enableBodyScroll(panelElement)
+  }
+
+  if (typeof document !== 'undefined') {
+    document.documentElement.classList.remove('quick-access-scroll-locked')
   }
 })
 
@@ -261,6 +314,10 @@ function handleTouchMove(event: TouchEvent) {
   // 只有从 bottom-drag-area 开始的触摸才处理上滑关闭
   if (!startedFromBottomArea.value) return
 
+  // 底部关闭手势从第一帧开始接管，防止 iOS 将早期位移传递给背景页面滚动。
+  event.preventDefault()
+  event.stopPropagation()
+
   // 检查当前触摸是否在插件网格内，如果是则不处理拖拽关闭
   const target = event.target as HTMLElement
   if (target.closest('.plugin-grid')) {
@@ -283,7 +340,6 @@ function handleTouchMove(event: TouchEvent) {
     if (deltaY >= 0) {
       // 向上拖拽，更新偏移量
       dragOffset.value = Math.min(deltaY, SWIPE_CONFIG.MAX_DRAG_DISTANCE)
-      event.preventDefault()
     } else {
       // 向下拖拽，停止拖拽
       isDraggingToClose.value = false
@@ -294,7 +350,6 @@ function handleTouchMove(event: TouchEvent) {
     if (deltaY > SWIPE_CONFIG.START_THRESHOLD) {
       isDraggingToClose.value = true
       dragOffset.value = Math.min(deltaY, SWIPE_CONFIG.MAX_DRAG_DISTANCE)
-      event.preventDefault()
     }
   }
 
@@ -330,6 +385,27 @@ function handleTouchEnd() {
   startedFromBottomArea.value = false
 }
 
+// 底部手势区域不参与页面滚动，从触摸开始就阻止事件冒泡到全局下拉监听。
+function handleBottomTouchStart(event: TouchEvent) {
+  if (!props.visible) return
+
+  event.stopPropagation()
+  handleTouchStart(event)
+}
+
+function handleBottomTouchMove(event: TouchEvent) {
+  if (!props.visible) return
+
+  handleTouchMove(event)
+}
+
+function handleBottomTouchEnd(event: TouchEvent) {
+  if (!props.visible) return
+
+  event.stopPropagation()
+  handleTouchEnd()
+}
+
 // 点击底部空白区域关闭
 function handleBackdropClick(event: MouseEvent) {
   const target = event.target as HTMLElement
@@ -347,6 +423,7 @@ function handleBackdropClick(event: MouseEvent) {
 
 <template>
   <VCard
+    ref="quickAccessRef"
     :ripple="false"
     class="plugin-quick-access"
     :class="{ 'visible': isVisible }"
@@ -372,7 +449,7 @@ function handleBackdropClick(event: MouseEvent) {
     </div>
 
     <!-- 插件网格 -->
-    <div class="plugin-grid">
+    <div class="plugin-grid quick-access-scroll">
       <!-- 加载状态 -->
       <LoadingBanner v-if="loading" />
 
@@ -420,40 +497,41 @@ function handleBackdropClick(event: MouseEvent) {
           <div class="section-title">{{ t('plugin.allPlugins') }}</div>
         </div>
 
-        <div v-if="pluginsWithPage.length > 0" class="all-plugins-grid">
-          <div
-            v-for="plugin in pluginsWithPage"
-            :key="plugin.id"
-            class="plugin-item"
-            @click="handlePluginClick(plugin)"
-          >
-            <VBadge
-              dot
-              :color="plugin.state ? 'success' : 'secondary'"
-              location="top end"
-              :offset-x="-1"
-              :offset-y="-1"
+        <div v-if="pluginsWithPage.length > 0" class="all-plugins-container">
+          <div class="all-plugins-grid quick-access-scroll">
+            <div
+              v-for="plugin in pluginsWithPage"
+              :key="plugin.id"
+              class="plugin-item"
+              @click="handlePluginClick(plugin)"
             >
-              <div
-                class="plugin-icon"
-                :style="{
-                  background: `${getPluginBackgroundColor(plugin)}`,
-                }"
+              <VBadge
+                dot
+                :color="plugin.state ? 'success' : 'secondary'"
+                location="top end"
+                :offset-x="-1"
+                :offset-y="-1"
               >
-                <VImg
-                  :src="getPluginIcon(plugin)"
-                  :alt="plugin.plugin_name"
-                  cover
-                  @load="src => handleIconLoaded(src, plugin)"
-                  @error="handleIconError(plugin)"
-                  class="rounded-lg"
-                />
-              </div>
-            </VBadge>
-            <div class="plugin-name">{{ plugin.plugin_name }}</div>
+                <div
+                  class="plugin-icon"
+                  :style="{
+                    background: `${getPluginBackgroundColor(plugin)}`,
+                  }"
+                >
+                  <VImg
+                    :src="getPluginIcon(plugin)"
+                    :alt="plugin.plugin_name"
+                    cover
+                    @load="src => handleIconLoaded(src, plugin)"
+                    @error="handleIconError(plugin)"
+                    class="rounded-lg"
+                  />
+                </div>
+              </VBadge>
+              <div class="plugin-name">{{ plugin.plugin_name }}</div>
+            </div>
           </div>
         </div>
-
         <!-- 空状态（只有在没有插件时显示） -->
         <div v-else-if="pluginsWithPage.length === 0" class="empty-state">
           <VIcon icon="mdi-puzzle-outline" size="48" color="grey" />
@@ -463,7 +541,14 @@ function handleBackdropClick(event: MouseEvent) {
     </div>
 
     <!-- 底部拖动区域 -->
-    <div class="bottom-drag-area" @click="handleBackdropClick">
+    <div
+      class="bottom-drag-area"
+      @click="handleBackdropClick"
+      @touchstart.stop="handleBottomTouchStart"
+      @touchmove.prevent.stop="handleBottomTouchMove"
+      @touchend.stop="handleBottomTouchEnd"
+      @touchcancel.stop="handleBottomTouchEnd"
+    >
       <!-- 底部指示器 -->
       <div class="bottom-indicator">
         <div
@@ -483,15 +568,6 @@ function handleBackdropClick(event: MouseEvent) {
       </div>
     </div>
   </VCard>
-
-  <!-- 插件数据弹窗 -->
-  <PluginDataDialog
-    v-if="showPluginDataDialog && currentPlugin"
-    v-model="showPluginDataDialog"
-    :plugin="currentPlugin"
-    :show_switch="false"
-    @close="handleClosePluginDataDialog"
-  />
 </template>
 
 <style lang="scss" scoped>
@@ -622,10 +698,34 @@ function handleBackdropClick(event: MouseEvent) {
   padding-inline: 0;
 }
 
+.all-plugins-container {
+  display: flex;
+  overflow: hidden;
+  flex: 1;
+  flex-direction: column;
+  min-block-size: 0;
+}
+
 .all-plugins-grid {
   display: grid;
   gap: 4px;
   grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+  max-block-size: 100%;
+  -webkit-overflow-scrolling: touch;
+  -ms-overflow-style: none; // IE/Edge
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-block: 8px;
+  padding-inline: 0;
+
+  // 隐藏滚动条
+  scrollbar-width: none; // Firefox
+  touch-action: pan-y;
+  will-change: scroll-position;
+
+  &::-webkit-scrollbar {
+    display: none; // WebKit 浏览器
+  }
 }
 
 .plugin-item {
@@ -677,6 +777,7 @@ function handleBackdropClick(event: MouseEvent) {
   font-size: 12px;
   font-weight: 500;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   line-height: 1.2;
   max-block-size: 2.4em;
   text-align: center;
@@ -705,6 +806,15 @@ function handleBackdropClick(event: MouseEvent) {
   cursor: pointer;
   padding-block: 8px 0;
   padding-inline: 20px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+:global(html.quick-access-scroll-locked),
+:global(html.quick-access-scroll-locked body) {
+  overflow: hidden !important;
+  overscroll-behavior: none;
 }
 
 @media (hover: none) and (pointer: coarse) {

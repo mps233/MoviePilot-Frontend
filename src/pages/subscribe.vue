@@ -1,11 +1,12 @@
 <script setup lang="ts">
+import { debounce } from 'lodash-es'
 import SubscribeListView from '@/views/subscribe/SubscribeListView.vue'
-import SubscribePopularView from '@/views/subscribe/SubscribePopularView.vue'
-import SubscribeShareView from '@/views/subscribe/SubscribeShareView.vue'
-import SubscribeEditDialog from '@/components/dialog/SubscribeEditDialog.vue'
-import SubscribeShareStatisticsDialog from '@/components/dialog/SubscribeShareStatisticsDialog.vue'
 import { useI18n } from 'vue-i18n'
 import { useDynamicHeaderTab } from '@/composables/useDynamicHeaderTab'
+import { useDynamicButton } from '@/composables/useDynamicButton'
+import { usePWA } from '@/composables/usePWA'
+import { useUserStore } from '@/stores'
+import { openSharedDialog } from '@/composables/useSharedDialog'
 
 import { getSubscribeMovieTabs, getSubscribeTvTabs } from '@/router/i18n-menu'
 
@@ -13,23 +14,30 @@ import { getSubscribeMovieTabs, getSubscribeTvTabs } from '@/router/i18n-menu'
 const { t } = useI18n()
 
 const route = useRoute()
+const userStore = useUserStore()
+const { appMode } = usePWA()
+
+// 非默认标签页和弹窗按需加载，避免进入订阅列表时同步下载分享/统计相关代码。
+const SubscribePopularView = defineAsyncComponent(() => import('@/views/subscribe/SubscribePopularView.vue'))
+const SubscribeShareView = defineAsyncComponent(() => import('@/views/subscribe/SubscribeShareView.vue'))
+const SubscribeEditDialog = defineAsyncComponent(() => import('@/components/dialog/SubscribeEditDialog.vue'))
+const SubscribeShareStatisticsDialog = defineAsyncComponent(
+  () => import('@/components/dialog/SubscribeShareStatisticsDialog.vue'),
+)
 
 const subType = route.meta.subType?.toString()
 const subId = ref(route.query.id as string)
 const activeTab = ref((route.query.tab as string) || '')
-const shareViewKey = ref(0)
+const subscribeListViewRef = ref<InstanceType<typeof SubscribeListView> | null>(null)
 
 // 获取标签页
 const subscribeTabs = computed(() => {
   if (subType === '电影') {
-    return getSubscribeMovieTabs()
+    return getSubscribeMovieTabs(t)
   } else {
-    return getSubscribeTvTabs()
+    return getSubscribeTvTabs(t)
   }
 })
-
-// 默认订阅设置弹窗
-const subscribeEditDialog = ref(false)
 
 // 订阅过滤弹窗
 const filterSubscribeDialog = ref(false)
@@ -37,8 +45,8 @@ const filterSubscribeDialog = ref(false)
 // 搜索订阅分享弹窗
 const searchShareDialog = ref(false)
 
-// 订阅分享统计弹窗
-const shareStatisticsDialog = ref(false)
+// 排序模式
+const subscribeSortMode = ref(false)
 
 // 订阅过滤词
 const subscribeFilter = ref('')
@@ -48,17 +56,12 @@ const subscribeStatusFilter = ref<string | null>(null)
 
 // 分享搜索词
 const shareKeyword = ref('')
-
-// 搜索分享
-const searchShares = () => {
-  searchShareDialog.value = false
-  shareViewKey.value++
-}
+const shareKeywordInput = ref('')
 
 // 筛选选项
 const filterOptions = computed(() => {
   const baseOptions = [
-    { value: 'all', label: t('common.all'), icon: 'mdi-format-list-bulleted' },
+    { value: 'all', label: t('common.all'), icon: 'mdi-filter-multiple-outline' },
     { value: 'best_version', label: t('subscribe.bestVersion'), icon: 'mdi-refresh', color: 'warning' },
   ]
 
@@ -82,17 +85,135 @@ const filterOptions = computed(() => {
   ]
 })
 
-// 计算筛选按钮颜色
+// 当前选中的筛选选项
+const currentFilter = computed(() => {
+  return filterOptions.value.find(option => option.value === (subscribeStatusFilter.value || 'all'))
+})
+
+// 计算筛选按钮颜色 - 有名称筛选或状态筛选时高亮
 const filterButtonColor = computed(() => {
   if (subscribeFilter.value || (subscribeStatusFilter.value && subscribeStatusFilter.value !== 'all')) {
-    return 'primary'
+    return currentFilter.value?.color || 'primary'
   }
   return 'gray'
 })
 
+// 选择筛选选项
+function selectFilter(value: string) {
+  subscribeStatusFilter.value = value
+  filterSubscribeDialog.value = false
+}
+
 // VMenu activator选择器
 const filterActivator = computed(() => '[data-menu-activator="filter-btn"]')
-const searchActivator = computed(() => '[data-menu-activator="search-btn"]')
+const searchActivator = computed(() => '[data-menu-activator="share-filter-btn"]')
+
+const showDefaultRuleAction = computed(() => activeTab.value === 'mysub')
+const showSubscribeHistoryAction = computed(() => showDefaultRuleAction.value && userStore.superUser)
+const showShareStatisticsAction = computed(() => activeTab.value === 'share')
+
+function openDefaultRuleDialog() {
+  openSharedDialog(
+    SubscribeEditDialog,
+    {
+      default: true,
+      type: subType,
+    },
+    {},
+    { closeOn: ['close', 'save'] },
+  )
+}
+
+function openSubscribeHistoryDialog() {
+  subscribeListViewRef.value?.openHistoryDialog()
+}
+
+function openShareStatisticsDialog() {
+  openSharedDialog(SubscribeShareStatisticsDialog, {}, {}, { closeOn: ['close'] })
+}
+
+function toggleSubscribeSortMode() {
+  subscribeSortMode.value = !subscribeSortMode.value
+}
+
+const shareKeywordUpdater = debounce((keyword: string) => {
+  shareKeyword.value = keyword.trim()
+}, 300)
+
+watch(shareKeywordInput, newKeyword => {
+  shareKeywordUpdater(newKeyword || '')
+})
+
+watch(activeTab, newTab => {
+  if (newTab !== 'share') {
+    searchShareDialog.value = false
+  }
+})
+
+onUnmounted(() => {
+  shareKeywordUpdater.cancel()
+})
+
+const subscribeDynamicMenuItems = computed(() => {
+  if (!appMode.value) return undefined
+
+  if (activeTab.value === 'mysub') {
+    const items: Array<{
+      titleKey: string
+      titleParams?: Record<string, unknown>
+      icon: string
+      action: () => void
+    }> = []
+
+    if (showSubscribeHistoryAction.value) {
+      items.push({
+        titleKey: 'dialog.subscribeHistory.title',
+        titleParams: { type: subType },
+        icon: 'mdi-history',
+        action: openSubscribeHistoryDialog,
+      })
+    }
+
+    items.push({
+      titleKey: 'dialog.subscribeEdit.titleDefault',
+      icon: 'mdi-clipboard-edit-outline',
+      action: openDefaultRuleDialog,
+    })
+
+    return items.length > 1 ? items : undefined
+  }
+
+  return undefined
+})
+
+const subscribeDynamicIcon = computed(() => {
+  if (showShareStatisticsAction.value) return 'mdi-chart-line'
+  if (showSubscribeHistoryAction.value) return 'mdi-history'
+  return 'mdi-clipboard-edit-outline'
+})
+
+function handleSubscribeDynamicAction() {
+  if (showShareStatisticsAction.value) {
+    openShareStatisticsDialog()
+    return
+  }
+
+  if (showSubscribeHistoryAction.value) {
+    openSubscribeHistoryDialog()
+    return
+  }
+
+  if (showDefaultRuleAction.value) {
+    openDefaultRuleDialog()
+  }
+}
+
+useDynamicButton({
+  icon: subscribeDynamicIcon,
+  onClick: handleSubscribeDynamicAction,
+  menuItems: subscribeDynamicMenuItems,
+  show: computed(() => appMode.value && (showDefaultRuleAction.value || showShareStatisticsAction.value)),
+})
 
 // 使用动态标签页
 const { registerHeaderTab } = useDynamicHeaderTab()
@@ -114,36 +235,35 @@ registerHeaderTab({
       show: computed(() => activeTab.value === 'mysub'),
     },
     {
-      icon: 'mdi-chart-line',
+      icon: 'mdi-sort-variant',
+      variant: 'text',
+      color: computed(() => (subscribeSortMode.value ? 'warning' : 'gray')),
+      class: 'settings-icon-button',
+      action: toggleSubscribeSortMode,
+      show: computed(() => activeTab.value === 'mysub'),
+    },
+    {
+      icon: 'mdi-checkbox-multiple-marked-outline',
       variant: 'text',
       color: 'gray',
       class: 'settings-icon-button',
-      dataAttr: 'statistics-btn',
       action: () => {
-        shareStatisticsDialog.value = true
+        // 触发批量管理模式
+        const event = new CustomEvent('toggle-batch-mode')
+        window.dispatchEvent(event)
       },
-      show: computed(() => activeTab.value === 'share'),
+      show: computed(() => activeTab.value === 'mysub'),
     },
     {
-      icon: 'mdi-movie-search-outline',
+      icon: 'mdi-filter-multiple-outline',
       variant: 'text',
-      color: computed(() => (shareKeyword.value ? 'primary' : 'gray')),
+      color: computed(() => (shareKeywordInput.value ? 'primary' : 'gray')),
       class: 'settings-icon-button',
-      dataAttr: 'search-btn',
+      dataAttr: 'share-filter-btn',
       action: () => {
         searchShareDialog.value = true
       },
       show: computed(() => activeTab.value === 'share'),
-    },
-    {
-      icon: 'mdi-clipboard-edit-outline',
-      variant: 'text',
-      color: 'gray',
-      class: 'settings-icon-button',
-      action: () => {
-        subscribeEditDialog.value = true
-      },
-      show: computed(() => activeTab.value === 'mysub'),
     },
   ],
 })
@@ -164,10 +284,14 @@ onMounted(() => {
         <transition name="fade-slide" appear>
           <div>
             <SubscribeListView
+              ref="subscribeListViewRef"
               :type="subType"
               :subid="subId"
               :keyword="subscribeFilter"
               :status-filter="subscribeStatusFilter ?? ''"
+              :sort-mode="subscribeSortMode"
+              :active="activeTab === 'mysub'"
+              @update:sort-mode="subscribeSortMode = $event"
             />
           </div>
         </transition>
@@ -182,50 +306,58 @@ onMounted(() => {
       <VWindowItem value="share">
         <transition name="fade-slide" appear>
           <div>
-            <SubscribeShareView :keyword="shareKeyword" :key="shareViewKey" />
+            <SubscribeShareView :keyword="shareKeyword" />
           </div>
         </transition>
       </VWindowItem>
     </VWindow>
 
-    <!-- 订阅过滤弹窗 -->
+    <!-- 订阅过滤下拉菜单 -->
     <Teleport to="body" v-if="filterSubscribeDialog">
       <VMenu
         v-model="filterSubscribeDialog"
-        width="25rem"
         :close-on-content-click="false"
         :activator="filterActivator"
         location="bottom end"
       >
-        <VCard>
-          <VCardItem>
-            <VCardTitle>
-              <VIcon icon="mdi-filter-multiple-outline" class="mr-2" />
-              {{ t('subscribe.filterSubscriptions') }}
-            </VCardTitle>
-            <VDialogCloseBtn @click="filterSubscribeDialog = false" />
-          </VCardItem>
-          <VCardText>
-            <VRow>
-              <!-- 名称筛选 -->
-              <VCol cols="6">
-                <VTextField v-model="subscribeFilter" :label="t('subscribe.name')" clearable density="comfortable" />
-              </VCol>
-
-              <!-- 状态筛选 -->
-              <VCol cols="6">
-                <VSelect
-                  v-model="subscribeStatusFilter"
-                  :items="filterOptions"
-                  item-title="label"
-                  item-value="value"
-                  :label="t('common.status')"
-                  density="comfortable"
-                  clearable
+        <VCard min-width="220">
+          <!-- 名称搜索 -->
+          <div class="pa-3">
+            <VTextField
+              v-model="subscribeFilter"
+              :placeholder="t('subscribe.name')"
+              prepend-inner-icon="mdi-magnify"
+              density="compact"
+              variant="outlined"
+              hide-details
+              clearable
+            />
+          </div>
+          <VDivider class="mt-2" />
+          <!-- 状态筛选列表 -->
+          <VList density="compact" class="px-2 py-1">
+            <VListSubheader>{{ t('common.status') }}</VListSubheader>
+            <VListItem
+              v-for="option in filterOptions"
+              :key="option.value"
+              :active="(subscribeStatusFilter || 'all') === option.value"
+              @click="selectFilter(option.value)"
+              density="compact"
+            >
+              <template #prepend>
+                <VIcon :icon="option.icon" :color="option.color" size="small" />
+              </template>
+              <VListItemTitle>{{ option.label }}</VListItemTitle>
+              <template #append>
+                <VIcon
+                  v-if="(subscribeStatusFilter || 'all') === option.value"
+                  icon="mdi-check"
+                  color="primary"
+                  size="small"
                 />
-              </VCol>
-            </VRow>
-          </VCardText>
+              </template>
+            </VListItem>
+          </VList>
         </VCard>
       </VMenu>
     </Teleport>
@@ -234,46 +366,56 @@ onMounted(() => {
     <Teleport to="body" v-if="searchShareDialog">
       <VMenu
         v-model="searchShareDialog"
-        width="25rem"
         :close-on-content-click="false"
         :activator="searchActivator"
         location="bottom end"
       >
-        <VCard>
-          <VCardItem>
-            <VCardTitle>
-              <VIcon icon="mdi-movie-search-outline" class="mr-2" />
-              {{ t('subscribe.searchShares') }}
-            </VCardTitle>
-            <VDialogCloseBtn @click="searchShareDialog = false" />
-          </VCardItem>
-          <VCardText>
-            <VTextField v-model="shareKeyword" :label="t('subscribe.keyword')" clearable density="comfortable">
-              <template #append>
-                <VBtn prepend-icon="mdi-magnify" color="primary" @click="searchShares">{{ t('common.search') }}</VBtn>
-              </template>
-            </VTextField>
-          </VCardText>
+        <VCard min-width="260" max-width="320">
+          <div class="pa-3">
+            <VTextField
+              v-model="shareKeywordInput"
+              :placeholder="t('subscribe.keyword')"
+              prepend-inner-icon="mdi-magnify"
+              density="compact"
+              variant="outlined"
+              hide-details
+              clearable
+            />
+          </div>
         </VCard>
       </VMenu>
     </Teleport>
 
-    <!-- 订阅编辑弹窗 -->
-    <SubscribeEditDialog
-      v-if="subscribeEditDialog"
-      v-model="subscribeEditDialog"
-      :default="true"
-      :type="subType"
-      @save="subscribeEditDialog = false"
-      @close="subscribeEditDialog = false"
-    />
+    <Teleport to="body" v-if="!appMode && route.path.startsWith(`/subscribe/${subType === '电影' ? 'movie' : 'tv'}`)">
+      <div class="compact-fab-stack">
+        <VFab
+          v-if="showSubscribeHistoryAction"
+          icon="mdi-history"
+          color="info"
+          variant="tonal"
+          appear
+          class="compact-fab compact-fab--secondary"
+          @click="openSubscribeHistoryDialog"
+        />
+        <VFab
+          v-if="showDefaultRuleAction"
+          icon="mdi-clipboard-edit-outline"
+          color="primary"
+          appear
+          class="compact-fab compact-fab--primary"
+          @click="openDefaultRuleDialog"
+        />
+        <VFab
+          v-if="showShareStatisticsAction"
+          icon="mdi-chart-line"
+          color="primary"
+          appear
+          class="compact-fab compact-fab--primary"
+          @click="openShareStatisticsDialog"
+        />
+      </div>
+    </Teleport>
 
-    <!-- 订阅分享统计弹窗 -->
-    <SubscribeShareStatisticsDialog
-      v-if="shareStatisticsDialog"
-      v-model="shareStatisticsDialog"
-      @close="shareStatisticsDialog = false"
-    />
   </div>
 </template>
 

@@ -140,14 +140,14 @@ onMounted(async () => {
     await fetchSiteInfo()
     if (siteForm.value.limit_interval || siteForm.value.limit_count || siteForm.value.limit_seconds)
       isLimit.value = true
-    if (siteForm.value.apikey) siteType.value = 'api'
+    if (siteForm.value.apikey || siteForm.value.token) siteType.value = 'api'
   }
   await loadDownloaderSetting()
 })
 </script>
 
 <template>
-  <DialogWrapper scrollable :close-on-back="false" eager max-width="45rem" :fullscreen="!display.mdAndUp.value">
+  <VDialog scrollable :close-on-back="false" eager max-width="45rem" :fullscreen="!display.mdAndUp.value">
     <VCard>
       <VCardItem :class="props.oper === 'add' ? 'py-3' : 'py-2'">
         <template #prepend>
@@ -224,15 +224,15 @@ onMounted(async () => {
             </VCol>
           </VRow>
           <VTabs v-model="siteType" show-arrows class="v-tabs-pill mt-3">
-            <VTab selected-class="v-tab--selected">
+            <VTab value="cookie" selected-class="v-tab--selected">
               <div>
-                <VIcon size="20" start icon="mdi-cookie" value="cookie" />
+                <VIcon size="20" start icon="mdi-cookie" />
                 Cookie
               </div>
             </VTab>
-            <VTab selected-class="v-tab--selected">
+            <VTab value="api" selected-class="v-tab--selected">
               <div>
-                <VIcon size="20" start icon="mdi-api" value="api" />
+                <VIcon size="20" start icon="mdi-api" />
                 API
               </div>
             </VTab>
@@ -350,5 +350,5 @@ onMounted(async () => {
         </VBtn>
       </VCardActions>
     </VCard>
-  </DialogWrapper>
+  </VDialog>
 </template>

@@ -10,13 +10,15 @@ import { formatSeason } from '@/@core/utils/formatters'
 import router from '@/router'
 import { isNullOrEmptyObject } from '@/@core/utils'
 import { useUserStore } from '@/stores'
-import SubscribeEditDialog from '@/components/dialog/SubscribeEditDialog.vue'
-import SearchSiteDialog from '@/components/dialog/SearchSiteDialog.vue'
 import { useTheme } from 'vuetify'
 import { useI18n } from 'vue-i18n'
 import { hasPermission } from '@/utils/permission'
 import { useGlobalSettingsStore } from '@/stores'
 import { openMediaServerWithAutoDetect, openDoubanApp } from '@/utils/appDeepLink'
+import { openSharedDialog } from '@/composables/useSharedDialog'
+
+const SearchSiteDialog = defineAsyncComponent(() => import('@/components/dialog/SearchSiteDialog.vue'))
+const SubscribeEditDialog = defineAsyncComponent(() => import('@/components/dialog/SubscribeEditDialog.vue'))
 
 // 国际化
 const { t } = useI18n()
@@ -46,9 +48,6 @@ const theme = useTheme()
 // 媒体详情
 const mediaDetail = ref<MediaInfo>({} as MediaInfo)
 
-// 订阅编辑弹窗
-const subscribeEditDialog = ref(false)
-
 // 本地是否存在，存在则包括Item信息
 const existsItemId = ref('')
 
@@ -70,9 +69,6 @@ const seasonsNotExisted = ref<{ [key: number]: number }>({})
 // 各季的订阅状态
 const seasonsSubscribed = ref<{ [key: number]: boolean }>({})
 
-// 订阅编号
-const subscribeId = ref<number>()
-
 // 所有站点
 const allSites = ref<Site[]>([])
 
@@ -82,13 +78,37 @@ const selectedSites = ref<number[]>([])
 // 搜索方式 title/imdbid
 const searchType = ref('title')
 
-// 选择站点对话框
-const chooseSiteDialog = ref(false)
-
 // 计算主题是否为透明
-const isNonTransparentTheme = computed(() => {
-  return theme.name.value !== 'transparent'
+const isTransparentTheme = computed(() => {
+  return theme.name.value === 'transparent'
 })
+
+// 打开订阅编辑弹窗，关闭和保存时由共享 Host 自动释放实例。
+function openSubscribeEditDialog(subid: number) {
+  openSharedDialog(
+    SubscribeEditDialog,
+    { subid },
+    {
+      remove: onSubscribeEditRemove,
+    },
+    { closeOn: ['close', 'save', 'remove'] },
+  )
+}
+
+// 打开站点选择弹窗，并把站点选择结果交回详情页执行搜索。
+function openSearchSiteDialog() {
+  openSharedDialog(
+    SearchSiteDialog,
+    {
+      sites: allSites.value,
+      selected: selectedSites.value,
+    },
+    {
+      search: searchSites,
+    },
+    { closeOn: ['close', 'search'] },
+  )
+}
 
 // 查询所有站点
 async function querySites() {
@@ -150,7 +170,8 @@ async function loadSeasonEpisodes(season: number) {
   // 加载季集信息
   if (seasonEpisodesInfo.value[season]) return
   try {
-    const result: TmdbEpisode[] = await api.get(`tmdb/${mediaDetail.value.tmdb_id}/${season}`)
+    const params = mediaDetail.value.episode_group ? { episode_group: mediaDetail.value.episode_group } : undefined
+    const result: TmdbEpisode[] = await api.get(`tmdb/${mediaDetail.value.tmdb_id}/${season}`, params ? { params } : undefined)
     seasonEpisodesInfo.value[season] = result || []
   } catch (error) {
     console.error(error)
@@ -189,7 +210,7 @@ async function checkExists() {
 }
 
 // 查询当前媒体是否已订阅
-async function checkSubscribe(season = 0) {
+async function checkSubscribe(season: number | null = null) {
   try {
     const mediaid = getMediaId()
 
@@ -233,9 +254,14 @@ async function checkMovieSubscribed() {
   isSubscribed.value = await checkSubscribe()
 }
 
-// 过滤掉第0季
+// 季列表，第0季排在最后
 const getMediaSeasons = computed(() => {
-  return mediaDetail.value?.season_info?.filter(season => season.season_number !== 0)
+  if (!mediaDetail.value?.season_info) return []
+  return [...mediaDetail.value.season_info].sort((a, b) => {
+    if (a.season_number === 0) return 1
+    if (b.season_number === 0) return -1
+    return (a.season_number || 0) - (b.season_number || 0)
+  })
 })
 
 // 检查所有季的订阅状态
@@ -243,7 +269,7 @@ async function checkSeasonsSubscribed() {
   if (mediaDetail.value.type !== '电视剧') return
   try {
     mediaDetail.value?.season_info?.forEach(async item => {
-      seasonsSubscribed.value[item.season_number ?? 0] = await checkSubscribe(item.season_number)
+      seasonsSubscribed.value[item.season_number ?? 0] = await checkSubscribe(item.season_number ?? null)
     })
   } catch (error) {
     console.error(error)
@@ -251,13 +277,13 @@ async function checkSeasonsSubscribed() {
 }
 
 // 调用API添加订阅，电视剧的话需要指定季
-async function addSubscribe(season = 0) {
+async function addSubscribe(season: number | null) {
   // 开始处理
   startNProgress()
   try {
     // 是否洗版
     let best_version = existsItemId.value ? 1 : 0
-    if (season)
+    if (season !== null)
       // 全部存在时洗版
       best_version = !seasonsNotExisted.value[season] ? 1 : 0
     // 请求API
@@ -268,7 +294,7 @@ async function addSubscribe(season = 0) {
       tmdbid: mediaDetail.value?.tmdb_id,
       doubanid: mediaDetail.value?.douban_id,
       bangumiid: mediaDetail.value?.bangumi_id,
-      season,
+      season: mediaDetail.value?.type === '电影' ? null : season,
       best_version,
     })
 
@@ -276,7 +302,7 @@ async function addSubscribe(season = 0) {
     if (result.success) {
       // 订阅成功
       isSubscribed.value = true
-      if (season) seasonsSubscribed.value[season] = true
+      if (season !== null) seasonsSubscribed.value[season] = true
     }
 
     // 提示
@@ -286,8 +312,7 @@ async function addSubscribe(season = 0) {
     if (result.success) {
       const show_edit_dialog = await queryDefaultSubscribeConfig()
       if (show_edit_dialog) {
-        subscribeId.value = result.data.id
-        subscribeEditDialog.value = true
+        openSubscribeEditDialog(result.data.id)
       }
     }
   } catch (error) {
@@ -297,8 +322,8 @@ async function addSubscribe(season = 0) {
 }
 
 // 弹出添加订阅提示
-function showSubscribeAddToast(result: boolean, title: string, season: number, message: string, best_version: number) {
-  if (season) title = `${title} ${formatSeason(season.toString())}`
+function showSubscribeAddToast(result: boolean, title: string, season: number | null, message: string, best_version: number) {
+  if (season !== null) title = `${title} ${formatSeason(season.toString())}`
 
   let subname = t('media.subscribe.normal')
   if (best_version > 0) subname = t('media.subscribe.bestVersion')
@@ -307,7 +332,7 @@ function showSubscribeAddToast(result: boolean, title: string, season: number, m
 }
 
 // 调用API取消订阅
-async function removeSubscribe(season: number) {
+async function removeSubscribe(season: number | null) {
   // 开始处理
   startNProgress()
   try {
@@ -321,7 +346,7 @@ async function removeSubscribe(season: number) {
 
     if (result.success) {
       isSubscribed.value = false
-      if (season) seasonsSubscribed.value[season] = false
+      if (season !== null) seasonsSubscribed.value[season] = false
       $toast.success(`${mediaDetail.value?.title} ${t('media.subscribe.canceled')}`)
     } else {
       $toast.error(`${mediaDetail.value?.title} ${t('media.subscribe.cancelFailed', { reason: result.message })}`)
@@ -333,7 +358,7 @@ async function removeSubscribe(season: number) {
 }
 
 // 订阅按钮响应
-function handleSubscribe(season = 0) {
+function handleSubscribe(season: number | null = null) {
   if (isSubscribed.value) removeSubscribe(season)
   else addSubscribe(season)
 }
@@ -428,6 +453,17 @@ const getProductionCompanies = computed(() => {
   return mediaDetail.value.production_companies?.map(company => company.name)
 })
 
+// 获取最早实体/数字发行日期
+const getEarliestReleaseDate = computed(() => {
+  const filteredDates = mediaDetail.value.release_dates?.filter(date => [4, 5].includes(date.type))
+  if (!filteredDates || filteredDates.length === 0)
+    return null
+
+  return filteredDates.reduce((earliest, current) =>
+    new Date(current.date) < new Date(earliest.date) ? current : earliest,
+  )
+})
+
 // 计算存在状态的颜色
 function getExistColor(season: number) {
   const state = seasonsNotExisted.value[season]
@@ -517,7 +553,6 @@ async function queryDefaultSubscribeConfig() {
 
 // 删除订阅处理
 function onSubscribeEditRemove() {
-  subscribeEditDialog.value = false
   if (mediaDetail.value.type === '电影') checkMovieSubscribed()
   else checkSeasonsSubscribed()
 }
@@ -530,7 +565,7 @@ async function clickSearch(type: string) {
     await querySelectedSites()
   }
   if (allSites.value?.length > 0) {
-    chooseSiteDialog.value = true
+    openSearchSiteDialog()
   } else {
     handleSearch()
   }
@@ -538,7 +573,6 @@ async function clickSearch(type: string) {
 
 // 搜索多站点
 function searchSites(sites: number[]) {
-  chooseSiteDialog.value = false
   selectedSites.value = sites
   handleSearch()
 }
@@ -550,12 +584,16 @@ onBeforeMount(() => {
 
 <template>
   <LoadingBanner v-if="!isRefreshed" class="mt-12" />
-  <div v-if="mediaDetail.tmdb_id || mediaDetail.douban_id || mediaDetail.bangumi_id" class="max-w-8xl mx-auto px-4">
-    <template v-if="(getBackdropUrl || getPosterUrl) && isNonTransparentTheme">
-      <div class="vue-media-back absolute left-0 top-0 w-full h-96">
+  <div
+    v-if="mediaDetail.tmdb_id || mediaDetail.douban_id || mediaDetail.bangumi_id"
+    class="max-w-8xl mx-auto px-4"
+    :class="{ 'media-detail-transparent': isTransparentTheme }"
+  >
+    <template v-if="getBackdropUrl || getPosterUrl">
+      <div class="vue-media-back vue-media-back-image absolute left-0 top-0 w-full h-96">
         <VImg class="h-96" position="top" :src="getBackdropUrl || getPosterUrl" cover />
       </div>
-      <div class="vue-media-back absolute left-0 top-0 w-full h-96" />
+      <div class="vue-media-back vue-media-back-overlay absolute left-0 top-0 w-full h-96" />
     </template>
     <div class="media-page">
       <div class="media-header">
@@ -619,7 +657,7 @@ onBeforeMount(() => {
                 <VListItem @click="clickSearch('title')">
                   <VListItemTitle>{{ t('media.search.byTitle') }}</VListItemTitle>
                 </VListItem>
-                <VListItem @click="clickSearch('imdb')">
+                <VListItem @click="clickSearch('imdbid')">
                   <VListItemTitle>{{ t('media.search.byImdb') }}</VListItemTitle>
                 </VListItem>
               </VList>
@@ -630,7 +668,7 @@ onBeforeMount(() => {
             class="ms-2 mb-2"
             :color="getSubscribeColor"
             variant="tonal"
-            @click="handleSubscribe(0)"
+            @click="handleSubscribe()"
           >
             <template #prepend>
               <VIcon :icon="getSubscribeIcon" />
@@ -730,8 +768,9 @@ onBeforeMount(() => {
                   <template #default>
                     <div class="flex flex-row items-center justify-between">
                       <span class="font-weight-bold">{{
-                        t('media.seasonNumber', { number: season.season_number })
-                      }}</span>
+                        season.season_number === 0 && season.name ?
+                        season.name : t('media.seasonNumber', { number: season.season_number })
+                        }}</span>
                       <VChip size="small" class="ms-1">
                         {{ t('media.episodeCount', { count: season.episode_count }) }}
                       </VChip>
@@ -743,7 +782,7 @@ onBeforeMount(() => {
                           class="ms-1"
                           :color="seasonsSubscribed[season.season_number || 0] ? 'error' : 'warning'"
                           variant="text"
-                          @click.stop="handleSubscribe(season.season_number)"
+                          @click.stop="handleSubscribe(season.season_number ?? null)"
                         >
                           <VIcon
                             :icon="seasonsSubscribed[season.season_number || 0] ? 'mdi-heart' : 'mdi-heart-outline'"
@@ -837,6 +876,17 @@ onBeforeMount(() => {
                     />
                   </svg>
                   <span class="ml-1.5">{{ mediaDetail.release_date || mediaDetail.first_air_date }}</span>
+                </span>
+              </span>
+            </div>
+            <div v-if="mediaDetail.type === '电影' && getEarliestReleaseDate" class="media-fact">
+              <span>{{ t(getEarliestReleaseDate.type === 4 ? 'media.info.digitalRelease' : 'media.info.physicalRelease') }}</span>
+              <span class="media-fact-value">
+                <span class="flex items-center justify-end">
+                  <span class="inline-flex items-center justify-center h-4 w-4 text-[0.6rem] font-bold text-current border border-current leading-none">
+                    {{ getEarliestReleaseDate.iso_code }}
+                  </span>
+                  <span class="ml-1.5">{{ getEarliestReleaseDate.date.slice(0, 10) }}</span>
                 </span>
               </span>
             </div>
@@ -987,40 +1037,58 @@ onBeforeMount(() => {
     :error-title="t('media.error.title')"
     :error-description="t('media.error.noMediaInfo')"
   />
-  <!-- 订阅编辑弹窗 -->
-  <SubscribeEditDialog
-    v-if="subscribeEditDialog"
-    v-model="subscribeEditDialog"
-    :subid="subscribeId"
-    @close="subscribeEditDialog = false"
-    @save="subscribeEditDialog = false"
-    @remove="onSubscribeEditRemove"
-  />
-  <!-- 站点选择对话框 -->
-  <SearchSiteDialog
-    v-if="chooseSiteDialog"
-    v-model="chooseSiteDialog"
-    :sites="allSites"
-    :selected="selectedSites"
-    @search="searchSites"
-    @close="chooseSiteDialog = false"
-  />
 </template>
 
 <style lang="scss" scoped>
 .vue-media-back {
+  --media-backdrop-edge-opacity: 1;
+
+  z-index: 0;
+  pointer-events: none;
   background-image: linear-gradient(
       180deg,
       rgba(var(--v-theme-background), 0) 50%,
-      rgba(var(--v-theme-background), 1) 100%
+      rgba(var(--v-theme-background), var(--media-backdrop-edge-opacity)) 100%
     ),
-    linear-gradient(90deg, rgba(var(--v-theme-background), 0) 50%, rgba(var(--v-theme-background), 1) 100%),
-    linear-gradient(270deg, rgba(var(--v-theme-background), 0) 50%, rgba(var(--v-theme-background), 1) 100%);
+    linear-gradient(
+      0deg,
+      rgba(var(--v-theme-background), 0) 80%,
+      rgba(var(--v-theme-background), var(--media-backdrop-edge-opacity)) 100%
+    ),
+    linear-gradient(
+      90deg,
+      rgba(var(--v-theme-background), 0) 50%,
+      rgba(var(--v-theme-background), var(--media-backdrop-edge-opacity)) 100%
+    ),
+    linear-gradient(
+      270deg,
+      rgba(var(--v-theme-background), 0) 50%,
+      rgba(var(--v-theme-background), var(--media-backdrop-edge-opacity)) 100%
+    );
   margin-block-start: calc(-70px - env(safe-area-inset-top));
+}
+
+.vue-media-back-image {
+  background-image: none;
+}
+
+.media-detail-transparent .vue-media-back-overlay {
+  display: none;
+}
+
+.media-detail-transparent .vue-media-back-image {
+  opacity: 0.78;
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 58%, transparent 100%),
+    linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%);
+  mask-composite: intersect;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 58%, transparent 100%),
+    linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%);
+  -webkit-mask-composite: source-in;
 }
 
 .media-page {
   position: relative;
+  z-index: 1;
   background-position: 50%;
   background-size: cover;
   margin-block-start: calc(-4rem - env(safe-area-inset-top));

@@ -1,14 +1,18 @@
-import { onMounted, onUnmounted, ref, type Ref } from 'vue'
-import { sseManagerSingleton } from '@/utils/sseManager'
+import { getCurrentInstance, onMounted, onUnmounted, ref, type Ref } from 'vue'
+import { sseManagerSingleton, type SSEManagerOptions } from '@/utils/sseManager'
 import { addBackgroundTimer, removeBackgroundTimer } from '@/utils/backgroundManager'
 
+type UseSSEOptions = Partial<SSEManagerOptions> & {
+  connectDelay?: number
+}
+
 /**
- * 后台优化组合函数
- * 统一管理SSE连接和定时器，优化iOS后台性能
+ * 后台任务组合函数
+ * 统一管理SSE连接和定时器，减少后台常驻活动。
  */
-export function useBackgroundOptimization() {
+export function useBackground() {
   /**
-   * 使用优化的SSE连接
+   * 使用SSE连接
    * @param url SSE连接地址
    * @param messageHandler 消息处理函数
    * @param listenerId 监听器ID（用于区分不同的监听器）
@@ -18,31 +22,63 @@ export function useBackgroundOptimization() {
     url: string,
     messageHandler: (event: MessageEvent) => void,
     listenerId: string,
-    options?: {
-      backgroundCloseDelay?: number
-      reconnectDelay?: number
-      maxReconnectAttempts?: number
-    },
+    options?: UseSSEOptions,
   ) => {
-    const manager = sseManagerSingleton.getManager(url, options)
+    // 使用独立的SSE管理器，确保每个监听器都有独立的连接
+    const manager = sseManagerSingleton.getIndependentManager(url, listenerId, options)
+    const isConnected = ref(false)
+    let connectTimer: ReturnType<typeof setTimeout> | null = null
+    let isClosed = false
+    const statusListenerId = `${listenerId}:status`
+
+    manager.addStatusListener(statusListenerId, status => {
+      isConnected.value = status === 'open'
+    })
+
+    const cleanup = () => {
+      if (isClosed) return
+
+      isClosed = true
+
+      if (connectTimer) {
+        clearTimeout(connectTimer)
+        connectTimer = null
+      }
+
+      manager.removeStatusListener(statusListenerId)
+      manager.removeMessageListener(listenerId)
+      sseManagerSingleton.closeIndependentManager(url, listenerId)
+      isConnected.value = false
+    }
 
     onMounted(() => {
-      manager.addMessageListener(listenerId, messageHandler)
+      // 延迟建立连接，确保组件完全挂载
+      const connectDelay = options?.connectDelay || 100
+      connectTimer = setTimeout(() => {
+        connectTimer = null
+        if (isClosed) return
+
+        try {
+          manager.addMessageListener(listenerId, messageHandler)
+        } catch (error) {
+          console.error('SSE连接建立失败:', error)
+        }
+      }, connectDelay)
     })
 
-    onUnmounted(() => {
-      manager.removeMessageListener(listenerId)
-    })
+    onUnmounted(cleanup)
 
     return {
       manager,
       readyState: () => manager.readyState,
-      close: () => manager.removeMessageListener(listenerId),
+      close: cleanup,
+      isConnected,
+      forceReconnect: () => manager.forceReconnect(),
     }
   }
 
   /**
-   * 使用优化的定时器
+   * 使用定时器
    * @param id 定时器ID
    * @param callback 回调函数
    * @param interval 间隔时间（毫秒）
@@ -83,24 +119,51 @@ export function useBackgroundOptimization() {
     messageHandler: (event: MessageEvent) => void,
     listenerId: string,
     delay: number = 3000,
-    options?: Parameters<typeof useSSE>[3],
+    options?: UseSSEOptions,
   ) => {
-    const manager = sseManagerSingleton.getManager(url, options)
+    // 使用独立的SSE管理器，确保每个监听器都有独立的连接
+    const manager = sseManagerSingleton.getIndependentManager(url, listenerId, options)
+    const isConnected = ref(false)
+    let connectTimer: ReturnType<typeof setTimeout> | null = null
+    let isClosed = false
+    const statusListenerId = `${listenerId}:status`
+
+    manager.addStatusListener(statusListenerId, status => {
+      isConnected.value = status === 'open'
+    })
+
+    const cleanup = () => {
+      if (isClosed) return
+
+      isClosed = true
+
+      if (connectTimer) {
+        clearTimeout(connectTimer)
+        connectTimer = null
+      }
+
+      manager.removeStatusListener(statusListenerId)
+      manager.removeMessageListener(listenerId)
+      sseManagerSingleton.closeIndependentManager(url, listenerId)
+      isConnected.value = false
+    }
 
     onMounted(() => {
-      setTimeout(() => {
+      connectTimer = setTimeout(() => {
+        connectTimer = null
+        if (isClosed) return
+
         manager.addMessageListener(listenerId, messageHandler)
       }, delay)
     })
 
-    onUnmounted(() => {
-      manager.removeMessageListener(listenerId)
-    })
+    onUnmounted(cleanup)
 
     return {
       manager,
       readyState: () => manager.readyState,
-      close: () => manager.removeMessageListener(listenerId),
+      close: cleanup,
+      isConnected,
     }
   }
 
@@ -117,30 +180,53 @@ export function useBackgroundOptimization() {
     listenerId: string,
     isActive: Ref<boolean>,
   ) => {
-    const manager = sseManagerSingleton.getManager(url, {
-      backgroundCloseDelay: 1000, // 进度SSE更快关闭
-      reconnectDelay: 1000,
-      maxReconnectAttempts: 5,
-    })
+    const getManager = () =>
+      sseManagerSingleton.getIndependentManager(url, listenerId, {
+        backgroundCloseDelay: 1000, // 进度SSE更快关闭
+        reconnectDelay: 1000,
+        maxReconnectAttempts: 5,
+      })
+
+    let manager: ReturnType<typeof getManager> | null = null
+    let isListening = false
 
     const startProgress = () => {
-      if (isActive.value) {
-        manager.addMessageListener(listenerId, messageHandler)
+      if (!isActive.value || isListening) return
+
+      manager ??= getManager()
+      manager.addMessageListener(listenerId, messageHandler)
+      isListening = true
+    }
+
+    const stopProgress = (destroyManager = true) => {
+      if (!manager) {
+        isListening = false
+        return
       }
-    }
 
-    const stopProgress = () => {
       manager.removeMessageListener(listenerId)
+
+      if (destroyManager) {
+        sseManagerSingleton.closeIndependentManager(url, listenerId)
+        manager = null
+      }
+
+      isListening = false
     }
 
-    onUnmounted(() => {
-      stopProgress()
-    })
+    // 进度监听有些场景会在用户操作后动态创建；只有 setup 阶段创建时才注册自动卸载钩子。
+    if (getCurrentInstance()) {
+      onUnmounted(() => {
+        stopProgress(true)
+      })
+    }
 
     return {
       start: startProgress,
       stop: stopProgress,
-      manager,
+      get manager() {
+        return manager
+      },
     }
   }
 

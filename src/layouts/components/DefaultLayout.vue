@@ -9,8 +9,9 @@ import ShortcutBar from '@/layouts/components/ShortcutBar.vue'
 import UserProfile from '@/layouts/components/UserProfile.vue'
 import QuickAccess from '@/layouts/components/QuickAccess.vue'
 import HeaderTab from '@/layouts/components/HeaderTab.vue'
-import { useUserStore } from '@/stores'
+import { usePluginSidebarNavStore, useUserStore } from '@/stores'
 import { getNavMenus } from '@/router/i18n-menu'
+import { filterPluginSidebarNavEntries } from '@/utils/pluginSidebarNav'
 import { NavMenu } from '@/@layouts/types'
 import { useDisplay } from 'vuetify'
 import { useI18n } from 'vue-i18n'
@@ -18,7 +19,6 @@ import { useRoute } from 'vue-router'
 import { filterMenusByPermission } from '@/utils/permission'
 import { onUnreadMessage } from '@/utils/badge'
 import { usePullDownGesture } from '@/composables/usePullDownGesture'
-import { useScrollLockWithWatch } from '@/composables/useScrollLock'
 import { usePWA } from '@/composables/usePWA'
 import OfflinePage from '@/layouts/components/OfflinePage.vue'
 import { useGlobalOfflineStatus } from '@/composables/useOfflineStatus'
@@ -31,6 +31,7 @@ const route = useRoute()
 
 // 用户 Store
 const userStore = useUserStore()
+const pluginSidebarNavStore = usePluginSidebarNavStore()
 
 // 响应式的超级用户状态
 const superUser = computed(() => userStore.superUser)
@@ -163,17 +164,6 @@ const handleServiceWorkerMessage = (event: MessageEvent) => {
   }
 }
 
-// 使用滚动锁定 composable（自动监听showPluginQuickAccess的变化）
-useScrollLockWithWatch(showPluginQuickAccess, {
-  preventTouchScroll: true,
-  preserveScrollPosition: true,
-  autoRestore: true,
-  // 允许快速访问面板内的滚动
-  allowScrollSelectors: ['.plugin-quick-access'],
-  // 允许快速访问面板内的可滚动容器
-  allowScrollContainerSelectors: ['.plugin-grid'],
-})
-
 // 检查是否可以使用下拉手势
 const canUsePullGesture = () => {
   // 检查是否在dashboard页面
@@ -209,7 +199,7 @@ const {
 // 根据分类获取菜单列表
 const getMenuList = (header: string) => {
   // 使用国际化菜单
-  const menus = getNavMenus()
+  const menus = getNavMenus(t)
   const filteredMenus = filterMenusByPermission(menus, userPermissions.value)
   return filteredMenus.filter((item: NavMenu) => item.header === header)
 }
@@ -241,13 +231,43 @@ function handlePluginClick() {
   showPluginQuickAccess.value = false
 }
 
-onMounted(() => {
+function appendPluginSidebarMenus() {
+  for (const { navMenu, section } of filterPluginSidebarNavEntries(
+    pluginSidebarNavStore.items,
+    t,
+    userPermissions.value,
+  )) {
+    switch (section) {
+      case 'start':
+        startMenus.value.push(navMenu)
+        break
+      case 'discovery':
+        discoveryMenus.value.push(navMenu)
+        break
+      case 'subscribe':
+        subscribeMenus.value.push(navMenu)
+        break
+      case 'organize':
+        organizeMenus.value.push(navMenu)
+        break
+      case 'system':
+      default:
+        systemMenus.value.push(navMenu)
+        break
+    }
+  }
+}
+
+onMounted(async () => {
   // 获取菜单列表
   startMenus.value = getMenuList(t('menu.start'))
   discoveryMenus.value = getMenuList(t('menu.discovery'))
   subscribeMenus.value = getMenuList(t('menu.subscribe'))
   organizeMenus.value = getMenuList(t('menu.organize'))
   systemMenus.value = getMenuList(t('menu.system'))
+
+  await pluginSidebarNavStore.ensureSidebarNav()
+  appendPluginSidebarMenus()
 
   // 监听全局未读消息事件
   const unsubscribe = onUnreadMessage(handleUnreadMessage)
@@ -398,7 +418,7 @@ onMounted(() => {
 
     <!-- 👉 Footer -->
     <template #footer>
-      <Footer />
+      <Footer :show-nav="!showPluginQuickAccess" />
     </template>
   </VerticalNavLayout>
 

@@ -3,16 +3,15 @@
 @tailwind components;
 @tailwind utilities;
 
-// 基础样式
 html.v-overlay-scroll-blocked {
-  position: fixed;
-  position: relative;
-
-  --v-body-scroll-y: 0px !important;
+  position: static;
 }
 
-body {
-  overscroll-behavior: none;
+html.v-overlay-scroll-blocked body {
+  position: fixed;
+  overflow: hidden;
+  inset: 0;
+  inset-block-start: var(--v-body-scroll-y);
 }
 
 @mixin hide-scrollbar {
@@ -28,6 +27,12 @@ body {
   html,body {
     @include hide-scrollbar;
   }
+}
+
+// 全局卡片阴影 token：卡片统一不使用投影，避免透明主题和密集布局下出现脏边。
+html {
+  --app-card-rest-shadow: none;
+  --app-card-hover-shadow: none;
 }
 
 // 进度条样式
@@ -47,6 +52,233 @@ body {
   .v-card {
     block-size: 100%;
   }
+}
+
+// 统一系统内卡片阴影，显式覆盖 Vuetify elevation 或局部卡片默认投影。
+.v-card,
+.v-application .v-card.v-card[class] {
+  box-shadow: none !important;
+  transition: box-shadow 0.2s ease;
+}
+
+@media (hover: hover) {
+  .v-card:hover,
+  .v-application .v-card.v-card[class]:hover {
+    box-shadow: none !important;
+  }
+}
+
+// 应用类信息卡片：固定右侧媒体槽位，避免图片被左侧文字挤压变形。
+.app-card-shell {
+  position: relative;
+  block-size: 100%;
+}
+
+// 设置项强调卡片：复用通知模板入口的强调条、轻渐变与悬浮反馈。
+.app-card-colorful {
+  overflow: hidden;
+  border: 1px solid rgba(var(--app-card-accent-rgb), var(--app-card-border-opacity)) !important;
+  border-radius: 8px !important;
+  background:
+    linear-gradient(
+      135deg,
+      rgba(var(--app-card-accent-rgb), var(--app-card-accent-start-opacity)),
+      rgba(var(--app-card-accent-end-rgb), var(--app-card-accent-end-opacity)) 46%,
+      rgba(var(--v-theme-surface), 0) 76%
+    ),
+    rgba(var(--v-theme-surface), var(--app-card-surface-opacity)) !important;
+  box-shadow: var(--app-card-rest-shadow) !important;
+  color: rgb(var(--v-theme-on-surface));
+  --app-card-accent-rgb: var(--v-theme-primary);
+  --app-card-accent-end-rgb: var(--app-card-accent-rgb);
+  --app-card-accent-start-opacity: 0.09;
+  --app-card-accent-end-opacity: 0.06;
+  --app-card-border-opacity: 0.2;
+  --app-card-hover-border-opacity: 0.34;
+  --app-card-stripe-opacity: 0.78;
+  --app-card-surface-opacity: 0.92;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.app-card-colorful::before {
+  position: absolute;
+  background: rgb(var(--app-card-accent-rgb));
+  block-size: 100%;
+  content: "";
+  inline-size: 0.25rem;
+  inset-block: 0;
+  inset-inline-start: 0;
+  opacity: var(--app-card-stripe-opacity);
+  pointer-events: none;
+}
+
+.app-card-colorful:hover {
+  border-color: rgba(var(--app-card-accent-rgb), var(--app-card-hover-border-opacity)) !important;
+  box-shadow: var(--app-card-hover-shadow) !important;
+}
+
+.app-card-colorful:focus-visible {
+  outline: 2px solid rgba(var(--app-card-accent-rgb), 0.7);
+  outline-offset: 3px;
+}
+
+.app-card-color-probe {
+  position: absolute;
+  block-size: 3rem;
+  inline-size: 3rem;
+  inset-block-start: 0;
+  inset-inline-start: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+html[data-theme="transparent"] .app-card-colorful,
+.v-theme--transparent .app-card-colorful {
+  backdrop-filter: blur(var(--transparent-blur, 10px));
+  border: 0 !important;
+  --app-card-accent-start-opacity: 0.04;
+  --app-card-accent-end-opacity: 0.03;
+  --app-card-border-opacity: 0;
+  --app-card-hover-border-opacity: 0;
+  --app-card-stripe-opacity: 0.42;
+  --app-card-surface-opacity: var(--transparent-opacity-light, 0.2);
+}
+
+html[data-theme="transparent"],
+.v-theme--transparent {
+  --app-card-rest-shadow: none;
+  --app-card-hover-shadow: none;
+}
+
+// 保证卡片右上角的浮动操作区始终高于可点击的卡片内容层，避免误触发详情打开。
+.app-card-top-action {
+  z-index: 2;
+}
+
+.app-card-summary {
+  position: relative;
+  display: flex;
+  overflow: hidden;
+  align-items: stretch;
+  justify-content: flex-start;
+  block-size: 7.5rem;
+  min-block-size: 7.5rem;
+}
+
+.app-card-summary__content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  min-inline-size: 0;
+  padding-block: 0.25rem 0.5rem;
+  row-gap: 0.25rem;
+}
+
+.app-card-summary__title-row {
+  display: flex;
+  align-items: flex-start;
+  column-gap: 0.25rem;
+  min-inline-size: 0;
+}
+
+.app-card-summary__title-row > .v-badge {
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.app-card-summary__subtitle,
+.app-card-summary__meta-item {
+  overflow: hidden;
+  min-inline-size: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-card-summary__title {
+  display: -webkit-box;
+  overflow: hidden;
+  flex: 0 0 auto;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  line-height: 1.35;
+  max-block-size: calc(1.35em * 2);
+  min-inline-size: 0;
+  text-overflow: ellipsis;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.app-card-summary__title-row .app-card-summary__title {
+  flex: 1 1 auto;
+}
+
+.app-card-summary__meta {
+  display: flex;
+  overflow: hidden;
+  align-items: center;
+  column-gap: 0.5rem;
+  min-block-size: 1.5rem;
+  min-inline-size: 0;
+}
+
+.app-card-summary--single-action .app-card-summary__content {
+  padding-inline-end: 3.75rem;
+}
+
+.app-card-summary--double-action .app-card-summary__content {
+  padding-inline-end: 5rem;
+}
+
+.app-card-summary--title-subtitle {
+  padding-block: 0.75rem !important;
+}
+
+.app-card-summary--title-subtitle .app-card-summary__content {
+  justify-content: space-between;
+  block-size: 100%;
+  padding-block: 0;
+}
+
+.app-card-summary--title-subtitle .app-card-summary__title {
+  flex: 0 1 auto;
+}
+
+.app-card-summary--title-subtitle .app-card-summary__subtitle {
+  flex-shrink: 0;
+}
+
+.app-card-summary__media {
+  position: absolute;
+  z-index: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  inset-block-end: 0.75rem;
+  inset-inline-end: 1rem;
+  pointer-events: none;
+}
+
+.app-card-summary--single-action .app-card-summary__media,
+.app-card-summary--double-action .app-card-summary__media {
+  inset-inline-end: 1rem;
+}
+
+.app-card-summary__image {
+  flex-shrink: 0;
+  block-size: 3.5rem;
+  inline-size: 3.5rem;
+  max-block-size: 3.5rem;
+  max-inline-size: 3.5rem;
+  min-block-size: 3.5rem;
+  min-inline-size: 3.5rem;
+}
+
+.app-card-summary__image .v-img__img {
+  object-fit: contain;
 }
 
 // Toast通知样式
@@ -75,17 +307,17 @@ body {
 // 路由过渡动画
 .fade-slide-leave-active,
 .fade-slide-enter-active {
-  transition: all 0.6s;
+  transition: all 0.3s cubic-bezier(0.25, 1, 0.5, 1);
 }
 
 .fade-slide-enter-from {
   opacity: 0;
-  transform: translateY(-45px);
+  transform: translateX(20px);
 }
 
 .fade-slide-leave-to {
   opacity: 0;
-  transform: translateY(45px);
+  transform: translateX(20px);
 }
 
 // 网格布局样式
@@ -120,7 +352,7 @@ body {
 }
 
 .grid-directory-card {
-  grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 24rem), 1fr));
 }
 
 .grid-filterrule-card {
@@ -239,6 +471,122 @@ body {
   opacity:0.75;
 }
 
+// 紧凑型悬浮操作按钮
+.compact-fab-stack {
+  position: fixed;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.75rem;
+  inset-block-end: max(1rem, calc(env(safe-area-inset-bottom) + 1rem));
+  inset-inline-end: max(1rem, calc(env(safe-area-inset-right) + 1rem));
+  pointer-events: none;
+}
+
+.compact-fab-stack > * {
+  pointer-events: auto;
+}
+
+.compact-fab-stack--history {
+  inset-block-end: max(4.5rem, calc(env(safe-area-inset-bottom) + 4.5rem));
+}
+
+.compact-fab.v-fab {
+  display: inline-flex;
+  overflow: visible;
+  flex: none;
+  min-inline-size: 0 !important;
+  pointer-events: auto;
+}
+
+.compact-fab .v-fab__container {
+  position: static;
+  display: inline-flex;
+  overflow: visible;
+  margin: 0 !important;
+}
+
+.compact-fab .v-btn {
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.08);
+  backdrop-filter: blur(14px);
+  box-shadow:
+    0 16px 34px rgb(15 23 42 / 16%),
+    0 6px 16px rgb(15 23 42 / 10%);
+  opacity: 0.98;
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    filter 0.18s ease,
+    opacity 0.18s ease;
+}
+
+.compact-fab--primary .v-btn {
+  block-size: 3rem !important;
+  box-shadow:
+    0 20px 40px rgb(15 23 42 / 20%),
+    0 8px 18px rgb(15 23 42 / 12%);
+  inline-size: 3rem !important;
+}
+
+.compact-fab--secondary .v-btn {
+  block-size: 3rem !important;
+  inline-size: 3rem !important;
+}
+
+.compact-fab--primary .v-icon {
+  font-size: 1.75rem !important;
+}
+
+.compact-fab--secondary .v-icon {
+  font-size: 1.75rem !important;
+}
+
+@media (hover: hover) {
+  .compact-fab .v-btn:hover {
+    box-shadow:
+      0 22px 42px rgb(15 23 42 / 22%),
+      0 8px 18px rgb(15 23 42 / 12%);
+    filter: saturate(1.03);
+    transform: translateY(-2px);
+  }
+
+  .compact-fab--primary .v-btn:hover {
+    box-shadow:
+      0 26px 46px rgb(15 23 42 / 24%),
+      0 10px 22px rgb(15 23 42 / 14%);
+  }
+}
+
+.compact-fab .v-btn:active {
+  box-shadow:
+    0 10px 22px rgb(15 23 42 / 16%),
+    0 3px 8px rgb(15 23 42 / 10%);
+  transform: translateY(0) scale(0.98);
+}
+
+@media (width <= 768px) {
+  .compact-fab-stack {
+    gap: 0.625rem;
+    inset-block-end: max(0.875rem, calc(env(safe-area-inset-bottom) + 0.875rem));
+    inset-inline-end: max(0.875rem, calc(env(safe-area-inset-right) + 0.875rem));
+  }
+
+  .compact-fab-stack--history {
+    inset-block-end: max(4rem, calc(env(safe-area-inset-bottom) + 4rem));
+  }
+
+  .compact-fab--primary .v-btn {
+    block-size: 3.5rem !important;
+    inline-size: 3.5rem !important;
+  }
+
+  .compact-fab--secondary .v-btn {
+    block-size: 3rem !important;
+    inline-size: 3rem !important;
+  }
+}
+
 .apexcharts-title-text {
   color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)) !important;
 }
@@ -263,6 +611,7 @@ body {
 .v-overlay__content .v-list{
   backdrop-filter: blur(6px);
   background-color: rgb(var(--v-theme-surface), 0.9) !important;
+  padding-inline: 0.5rem !important;
 }
 
 .v-overlay__content .v-card:not(.bg-primary){
@@ -312,7 +661,28 @@ body {
 
 .settings-icon-button {
   flex-shrink: 0;
-  min-inline-size: auto;
+  border-radius: 0.95rem;
+  block-size: 2.75rem;
+  inline-size: 2.75rem;
+  margin-inline-start: 0.25rem;
+  min-inline-size: 2.75rem;
+}
+
+.settings-icon-button .v-icon {
+  font-size: 1.35rem;
+}
+
+@media (width <= 768px) {
+  .settings-icon-button {
+    border-radius: 0.825rem;
+    block-size: 2.5rem;
+    inline-size: 2.5rem;
+    min-inline-size: 2.5rem;
+  }
+
+  .settings-icon-button .v-icon {
+    font-size: 1.25rem;
+  }
 }
 
 .v-infinite-scroll__side {

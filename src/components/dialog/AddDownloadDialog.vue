@@ -6,9 +6,19 @@ import type { DownloaderConf, MediaInfo, TorrentInfo, TransferDirectoryConf } fr
 import { formatFileSize } from '@/@core/utils/formatters'
 import { VCardTitle, VChip } from 'vuetify/lib/components/index.mjs'
 import { useI18n } from 'vue-i18n'
+import MediaIdSelector from '../misc/MediaIdSelector.vue'
+import { numberValidator } from '@/@validators'
+import { useGlobalSettingsStore } from '@/stores'
 
 // 多语言支持
 const { t } = useI18n()
+
+// 从 provide 中获取全局设置
+const globalSettingsStore = useGlobalSettingsStore()
+const globalSettings = globalSettingsStore.globalSettings
+
+// 当前识别类型
+const mediaSource = ref(globalSettings.RECOGNIZE_SOURCE || 'themoviedb')
 
 // 输入参数
 const props = defineProps({
@@ -38,6 +48,18 @@ const directories = ref<TransferDirectoryConf[]>([])
 // 是否正在加载
 const loading = ref(false)
 
+// 是否显示高级选项
+const showAdvancedOptions = ref(false)
+
+// TMDB ID
+const tmdbid = ref<number | undefined>(undefined)
+
+// 豆瓣ID
+const doubanId = ref<string | undefined>(undefined)
+
+// TMDB选择对话框
+const mediaSelectorDialog = ref(false)
+
 // 计算按钮图标
 const icon = computed(() => (loading.value ? 'mdi-progress-download' : 'mdi-download'))
 
@@ -56,9 +78,21 @@ async function loadDirectories() {
   }
 }
 
+function convertToUri(item: TransferDirectoryConf) {
+  if (!item.download_path) {
+    return undefined
+  }
+  if (item.storage === 'local') {
+    return item.download_path
+  }
+  return item.storage + ':' + item.download_path
+}
+
 // 获取保存目录
 const targetDirectories = computed(() => {
-  const downloadDirectories = directories.value.map(item => item.download_path)
+  const downloadDirectories = directories.value
+    .map(item => convertToUri(item))
+    .filter((item): item is string => item !== undefined)
   return [...new Set(downloadDirectories)]
 })
 
@@ -94,6 +128,14 @@ async function addDownload() {
 
     if (props.media) {
       payload.media_in = props.media
+    }
+
+    // 添加媒体ID辅助识别
+    if (tmdbid.value) {
+      payload.tmdbid = tmdbid.value
+    }
+    if (doubanId.value) {
+      payload.doubanid = doubanId.value
     }
 
     const endpoint = props.media ? 'download/' : 'download/add'
@@ -132,7 +174,7 @@ onMounted(() => {
 })
 </script>
 <template>
-  <DialogWrapper max-width="35rem" scrollable>
+  <VDialog max-width="35rem" scrollable>
     <VCard>
       <VCardItem class="py-2">
         <template #prepend>
@@ -181,7 +223,6 @@ onMounted(() => {
             <VSelect
               v-model="selectedDownloader"
               :items="downloaderOptions"
-              size="small"
               :label="t('dialog.addDownload.downloader')"
               variant="underlined"
               :placeholder="t('dialog.addDownload.defaultPlaceholder')"
@@ -194,11 +235,57 @@ onMounted(() => {
               v-model="selectedDirectory"
               :items="targetDirectories"
               :label="t('dialog.addDownload.saveDirectory')"
-              size="small"
               :placeholder="t('dialog.addDownload.autoPlaceholder')"
               variant="underlined"
               density="comfortable"
               prepend-inner-icon="mdi-folder"
+            />
+          </VCol>
+        </VRow>
+        <VRow class="px-5 mt-2">
+          <VCol cols="12">
+            <VBtn
+              variant="text"
+              :prepend-icon="showAdvancedOptions ? 'mdi-chevron-up' : 'mdi-chevron-down'"
+              @click="showAdvancedOptions = !showAdvancedOptions"
+            >
+              {{
+                showAdvancedOptions
+                  ? t('dialog.addDownload.hideAdvancedOptions')
+                  : t('dialog.addDownload.showAdvancedOptions')
+              }}
+            </VBtn>
+          </VCol>
+        </VRow>
+        <VRow v-show="showAdvancedOptions" class="px-5">
+          <VCol cols="12">
+            <VTextField
+              v-if="mediaSource === 'themoviedb'"
+              v-model="tmdbid"
+              :label="t('dialog.reorganize.tmdbId')"
+              :placeholder="t('dialog.reorganize.mediaIdPlaceholder')"
+              :rules="[numberValidator]"
+              append-inner-icon="mdi-magnify"
+              :hint="t('dialog.reorganize.mediaIdHint')"
+              persistent-hint
+              prepend-inner-icon="mdi-identifier"
+              variant="underlined"
+              density="comfortable"
+              @click:append-inner="mediaSelectorDialog = true"
+            />
+            <VTextField
+              v-else
+              v-model="doubanId"
+              :label="t('dialog.reorganize.doubanId')"
+              :placeholder="t('dialog.reorganize.mediaIdPlaceholder')"
+              :rules="[numberValidator]"
+              append-inner-icon="mdi-magnify"
+              :hint="t('dialog.reorganize.mediaIdHint')"
+              persistent-hint
+              prepend-inner-icon="mdi-identifier"
+              variant="underlined"
+              density="comfortable"
+              @click:append-inner="mediaSelectorDialog = true"
             />
           </VCol>
         </VRow>
@@ -209,5 +296,15 @@ onMounted(() => {
         </VBtn>
       </VCardText>
     </VCard>
-  </DialogWrapper>
+    <!-- 媒体ID选择器 -->
+    <VDialog v-model="mediaSelectorDialog" width="40rem" scrollable max-height="85vh">
+      <MediaIdSelector
+        v-if="mediaSource === 'themoviedb'"
+        v-model="tmdbid"
+        @close="mediaSelectorDialog = false"
+        :type="mediaSource"
+      />
+      <MediaIdSelector v-else v-model="doubanId" @close="mediaSelectorDialog = false" :type="mediaSource" />
+    </VDialog>
+  </VDialog>
 </template>

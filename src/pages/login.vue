@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { debounce } from 'lodash-es'
 import { VForm } from 'vuetify/components/VForm'
 import { useAuthStore, useUserStore } from '@/stores'
 import { authState, userState } from '@/stores/types'
@@ -7,12 +6,16 @@ import { requiredValidator } from '@/@validators'
 import api from '@/api'
 import router from '@/router'
 import logo from '@images/logo.png'
-import { urlBase64ToUint8Array } from '@/@core/utils/navigator'
+import { bufferToBase64Url, base64UrlToUint8Array, urlBase64ToUint8Array } from '@/@core/utils/navigator'
 import { SUPPORTED_LOCALES, SupportedLocale } from '@/types/i18n'
 import { getCurrentLocale, setI18nLanguage } from '@/plugins/i18n'
 import { useTheme } from 'vuetify'
 import { getNavMenus } from '@/router/i18n-menu'
 import { filterMenusByPermission } from '@/utils/permission'
+import type { ApiResponse } from '@/api/types'
+import { openSharedDialog } from '@/composables/useSharedDialog'
+
+const LoginMfaDialog = defineAsyncComponent(() => import('@/components/dialog/LoginMfaDialog.vue'))
 
 // 国际化
 const { t } = useI18n()
@@ -20,9 +23,8 @@ const { t } = useI18n()
 const authStore = useAuthStore()
 //用户 Store
 const userStore = useUserStore()
-
 // 获取有权限的菜单
-const navMenus = getNavMenus()
+const navMenus = computed(() => getNavMenus(t))
 
 // 表单
 const form = ref({
@@ -42,6 +44,13 @@ const errorMessage = ref('')
 
 // 是否开启双重验证
 const isOTP = ref(false)
+
+// 二次验证对话框
+const mfaDialog = ref(false)
+
+// MFA PassKey loading
+const mfaPasskeyLoading = ref(false)
+let mfaDialogController: ReturnType<typeof openSharedDialog> | null = null
 
 // 用户名称输入框
 const usernameInput = ref()
@@ -66,29 +75,269 @@ const locales = Object.values(SUPPORTED_LOCALES)
 // 登录按钮 loading
 const loading = ref(false)
 
+// PassKey 登录按钮 loading
+const passkeyLoading = ref(false)
+
+// Conditional UI 的 AbortController
+let conditionalAbortController: AbortController | null = null
+
+// 手动模式的 AbortController（用于防止重复点击）
+let manualAbortController: AbortController | null = null
+
+// 标记当前是否有手动模式的 PassKey 请求正在进行
+let isManualPassKeyActive = false
+
+// 生成 MFA 共享弹窗使用的最新 props。
+function getMfaDialogProps() {
+  return {
+    errorMessage: errorMessage.value,
+    otpPassword: form.value.otp_password,
+    passkeyLoading: mfaPasskeyLoading.value,
+  }
+}
+
+// 打开 MFA 共享弹窗。
+function openMfaDialog() {
+  mfaDialog.value = true
+  const dialogProps = getMfaDialogProps()
+  if (mfaDialogController) {
+    mfaDialogController.updateProps(dialogProps)
+    return
+  }
+
+  mfaDialogController = openSharedDialog(
+    LoginMfaDialog,
+    dialogProps,
+    {
+      close: closeMfaDialog,
+      otp: loginWithOTP,
+      passkey: verifyWithPassKey,
+      'update:otpPassword': (value: string) => {
+        form.value.otp_password = value
+      },
+    },
+    { closeOn: ['close'] },
+  )
+}
+
+// 关闭 MFA 共享弹窗。
+function closeMfaDialog() {
+  mfaDialog.value = false
+  mfaDialogController?.close()
+  mfaDialogController = null
+}
+
+// PassKey 认证核心函数 - 处理 WebAuthn 认证流程
+interface PassKeyAuthOptions {
+  username?: string // 可选的用户名,用于 MFA 场景
+  isConditional?: boolean // 是否为 Conditional UI 模式
+  signal?: AbortSignal // AbortController 信号
+}
+
+// PassKey API 响应类型
+interface PassKeyStartResponse {
+  options: string // JSON 字符串
+  challenge: string
+}
+
+interface PassKeyFinishResponse {
+  access_token: string
+  super_user: boolean
+  user_id: number
+  user_name: string
+  avatar: string
+  level: number
+  permissions: Record<string, boolean>
+  wizard: boolean
+}
+
+async function authenticateWithPassKey(options: PassKeyAuthOptions = {}): Promise<PassKeyFinishResponse> {
+  const { username, isConditional = false, signal } = options
+
+  // 1. 开始认证流程
+  const startResponse = (await api.post(
+    '/mfa/passkey/authenticate/start',
+    username ? { username } : {},
+  )) as ApiResponse<PassKeyStartResponse>
+
+  if (!startResponse.success) {
+    throw new Error(startResponse.message || 'PassKey start failed')
+  }
+
+  const { options: optionsStr, challenge } = startResponse.data
+  const publicKeyOptions = JSON.parse(optionsStr)
+
+  // 2. 调用WebAuthn API
+  const credentialRequestOptions: CredentialRequestOptions = {
+    publicKey: {
+      ...publicKeyOptions,
+      challenge: base64UrlToUint8Array(publicKeyOptions.challenge),
+      allowCredentials: publicKeyOptions.allowCredentials?.map((cred: any) => ({
+        ...cred,
+        id: base64UrlToUint8Array(cred.id),
+      })),
+    },
+  }
+
+  // 如果是 Conditional UI 模式，添加 mediation 和 signal
+  if (isConditional) {
+    credentialRequestOptions.mediation = 'conditional'
+    if (signal) {
+      credentialRequestOptions.signal = signal
+    }
+  }
+
+  const credential = await navigator.credentials.get(credentialRequestOptions)
+
+  // Conditional UI 模式下，用户选择通行密钥后才显示 loading
+  if (isConditional) {
+    passkeyLoading.value = true
+  }
+
+  if (!credential) {
+    throw new Error('No credential selected')
+  }
+
+  // 3. 转换credential为可传输格式
+  const publicKeyCredential = credential as PublicKeyCredential
+  const assertionResponse = publicKeyCredential.response as AuthenticatorAssertionResponse
+  const credentialJSON = {
+    id: publicKeyCredential.id,
+    rawId: bufferToBase64Url(publicKeyCredential.rawId),
+    type: publicKeyCredential.type,
+    response: {
+      authenticatorData: bufferToBase64Url(assertionResponse.authenticatorData),
+      clientDataJSON: bufferToBase64Url(assertionResponse.clientDataJSON),
+      signature: bufferToBase64Url(assertionResponse.signature),
+      userHandle: assertionResponse.userHandle ? bufferToBase64Url(assertionResponse.userHandle) : null,
+    },
+  }
+
+  // 4. 完成认证
+  const finishResponse = (await api.post('/mfa/passkey/authenticate/finish', {
+    credential: credentialJSON,
+    challenge: challenge,
+  })) as PassKeyFinishResponse
+
+  if (!finishResponse || !finishResponse.access_token) {
+    throw new Error('PassKey finish failed: No access token')
+  }
+
+  return finishResponse
+}
+
+// 统一处理 PassKey 认证流程
+async function handlePassKeyAuth(
+  authOptions: PassKeyAuthOptions,
+  setLoading: (loading: boolean) => void,
+  onSuccess: (response: PassKeyFinishResponse) => Promise<void>,
+) {
+  const { isConditional = false } = authOptions
+  errorMessage.value = ''
+
+  // 检查浏览器环境
+  if (!window.PublicKeyCredential) {
+    if (!isConditional) {
+      if (!window.isSecureContext) {
+        errorMessage.value = t('login.passkeySecureContextRequired')
+      } else {
+        errorMessage.value = t('login.passkeyNotSupported')
+      }
+    }
+    return
+  }
+
+  // 如果是手动触发(非 Conditional UI)
+  if (!isConditional) {
+    // 取消之前的 Conditional UI 请求
+    if (conditionalAbortController) {
+      conditionalAbortController.abort()
+      conditionalAbortController = null
+    }
+
+    // 取消之前的手动请求（防止重复点击）
+    if (manualAbortController) {
+      manualAbortController.abort()
+    }
+
+    // 创建新的 AbortController
+    manualAbortController = new AbortController()
+
+    // 标记手动请求为活跃状态，并立即设置 loading
+    isManualPassKeyActive = true
+    setLoading(true)
+  }
+
+  try {
+    const finishResponse = await authenticateWithPassKey({
+      ...authOptions,
+      signal:
+        isConditional && conditionalAbortController
+          ? conditionalAbortController.signal
+          : !isConditional && manualAbortController
+            ? manualAbortController.signal
+            : undefined,
+    })
+
+    await onSuccess(finishResponse)
+  } catch (error: any) {
+    // Conditional UI 模式下：
+    // 1. 如果 loading 为 false，说明错误发生在用户选择密钥之前（如初始化失败、用户取消等），此时应静默
+    // 2. 如果是 AbortError，始终静默
+    if (isConditional && (!passkeyLoading.value || error.name === 'AbortError')) {
+      console.warn('[PassKey] Conditional UI silenced error:', error)
+      return
+    }
+
+    // 手动模式下的 AbortError 也应该静默（用户重复点击导致）
+    if (!isConditional && error.name === 'AbortError') {
+      console.warn('[PassKey] Manual request aborted (likely due to rapid clicking):', error)
+      return
+    }
+
+    // 设置错误信息
+    if (error.name === 'NotAllowedError') {
+      errorMessage.value = t('login.passkeyAuthCanceled')
+    } else if (error.name === 'NotSupportedError') {
+      errorMessage.value = t('login.passkeyNotSupported')
+    } else if (error.message?.includes('start failed')) {
+      errorMessage.value = t('login.passkeyLoginStartFailed')
+    } else {
+      errorMessage.value = t('login.authFailure')
+    }
+  } finally {
+    // 清除 loading 状态
+    if (!isConditional) {
+      // 手动模式：始终清除，并取消手动活跃标记
+      isManualPassKeyActive = false
+      setLoading(false)
+      manualAbortController = null
+    } else {
+      // Conditional UI 模式：只有在没有手动请求活跃时才清除
+      if (!isManualPassKeyActive && passkeyLoading.value) {
+        passkeyLoading.value = false
+      }
+    }
+  }
+}
+
+// 使用PassKey登录 (支持 Conditional UI)
+async function loginWithPassKey(isConditional = false) {
+  await handlePassKeyAuth(
+    { isConditional },
+    val => (passkeyLoading.value = val),
+    async response => {
+      await handleLoginSuccess(response)
+    },
+  )
+}
+
 // 切换语言
 async function switchLanguage(locale: SupportedLocale) {
   await setI18nLanguage(locale)
   currentLocale.value = locale
   langMenu.value = false
 }
-
-// 查询是否开启双重验证
-const fetchOTP = debounce(async () => {
-  const userid = usernameInput.value?.value
-  if (!userid) {
-    isOTP.value = false
-    return
-  }
-  api
-    .get(`/user/otp/${userid}`)
-    .then((response: any) => {
-      isOTP.value = response.success
-    })
-    .catch((error: any) => {
-      console.log(error)
-    })
-}, 500)
 
 // 订阅推送通知
 async function subscribeForPushNotifications() {
@@ -110,101 +359,152 @@ async function subscribeForPushNotifications() {
     try {
       await api.post('/message/webpush/subscribe', subscription)
     } catch (e) {
-      console.log(e)
+      console.error(e)
     }
   }
 }
 
 // 登录后处理
 async function afterLogin(superuser: boolean, userPayload: userState, filteredMenus: any[]) {
-  // 如果有原始路径，优先跳转到原始路径
-  if (authStore.originalPath && authStore.originalPath !== '/') {
-    router.push(authStore.originalPath)
+  // 如果需要显示设置向导，跳转到设置向导页面
+  if (userPayload.wizard) {
+    router.push('/setup-wizard')
   } else {
-    // 跳转到第一个有权限的菜单
-    router.push(filteredMenus[0].to)
+    // 如果有原始路径，优先跳转到原始路径
+    if (authStore.originalPath && authStore.originalPath !== '/') {
+      router.push(authStore.originalPath)
+    } else {
+      // 跳转到第一个有权限的菜单
+      router.push(filteredMenus[0].to)
+    }
   }
 
   // 订阅推送通知
   if (superuser) await subscribeForPushNotifications()
-  // 登录按钮 loading
-  loading.value = false
+}
+
+// 处理登录成功
+async function handleLoginSuccess(response: any) {
+  const userPayload: userState = {
+    superUser: response.super_user,
+    userID: response.user_id,
+    userName: response.user_name,
+    avatar: response.avatar,
+    level: response.level,
+    permissions: response.permissions,
+    wizard: response.wizard,
+  }
+
+  const userPermissions = {
+    is_superuser: userPayload.superUser,
+    ...userPayload.permissions,
+  }
+
+  const filteredMenus = filterMenusByPermission(navMenus.value, userPermissions)
+  if (filteredMenus.length === 0) {
+    errorMessage.value = t('login.noPermission')
+    return
+  }
+
+  const authPayLoad: authState = {
+    token: response.access_token,
+    remember: form.value.remember,
+  }
+
+  authStore.login(authPayLoad)
+  userStore.loginUser(userPayload)
+
+  await afterLogin(userPayload.superUser, userPayload, filteredMenus)
 }
 
 // 登录获取token事件
-function login() {
+async function login() {
   errorMessage.value = ''
 
   // 进行表单校验
-  if (!form.value.username || !form.value.password || (isOTP.value && !form.value.otp_password)) {
+  if (!form.value.username || !form.value.password) {
     return
   }
 
   // 登录按钮 loading
   loading.value = true
 
-  // 用户名密码
-  const formData = new FormData()
+  try {
+    // 用户名密码
+    const formData = new FormData()
 
-  formData.append('username', form.value.username)
-  formData.append('password', form.value.password)
-  formData.append('otp_password', form.value.otp_password)
+    formData.append('username', form.value.username)
+    formData.append('password', form.value.password)
+    formData.append('otp_password', form.value.otp_password)
 
-  // 请求token
-  api
-    .post('/login/access-token', formData, {
+    // 请求token
+    const response: any = await api.post('/login/access-token', formData, {
       headers: {
         Accept: 'application/json', // 设置 Accept 类型
       },
     })
-    .then((response: any) => {
-      const userPayload: userState = {
-        superUser: response.super_user,
-        userID: response.user_id,
-        userName: response.user_name,
-        avatar: response.avatar,
-        level: response.level,
-        permissions: response.permissions,
-      }
 
-      // 在保存用户信息之前检查权限
-      const userPermissions = {
-        is_superuser: userPayload.superUser,
-        ...userPayload.permissions,
-      }
+    await handleLoginSuccess(response)
+  } catch (error: any) {
+    // 登录失败，显示错误提示
+    if (!error.response) {
+      errorMessage.value = t('login.networkError')
+      return
+    }
 
-      const filteredMenus = filterMenusByPermission(navMenus, userPermissions)
-      // 如果用户没有任何可用菜单，拒绝登录
-      if (filteredMenus.length === 0) {
-        // 显示错误信息
-        errorMessage.value = t('login.noPermission')
-        loading.value = false
-        return
-      }
-
-      // 权限检查通过，保存用户信息
-      const authPayLoad: authState = {
-        token: response.access_token,
-        remember: form.value.remember,
-      }
-
-      authStore.login(authPayLoad)
-      userStore.loginUser(userPayload)
-
-      // 登录后处理
-      afterLogin(userPayload.superUser, userPayload, filteredMenus)
-    })
-    .catch((error: any) => {
-      // 登录失败，显示错误提示
-      if (!error.response) errorMessage.value = t('login.networkError')
-      else if (error.response.status === 401) errorMessage.value = t('login.authFailure')
-      else if (error.response.status === 403) errorMessage.value = t('login.permissionDenied')
-      else if (error.response.status === 500) errorMessage.value = t('login.serverError')
-      else errorMessage.value = `${t('login.loginFailed')} ${error.response.status}，${t('login.checkCredentials')}`
-      // 登录按钮 loading
-      loading.value = false
-    })
+    switch (error.response.status) {
+      case 401:
+        // 401错误可能是需要MFA或者认证失败
+        // 检查响应头是否有MFA要求标识
+        if (error.response.headers?.['x-mfa-required'] === 'true' && !form.value.otp_password) {
+          // 需要MFA验证，弹出对话框
+          isOTP.value = true
+          openMfaDialog()
+          return
+        }
+        // 不需要MFA或已填写OTP但认证失败
+        errorMessage.value = t('login.authFailure')
+        // 认证失败后清空OTP密码，防止下次点击不弹出对话框
+        form.value.otp_password = ''
+        break
+      case 403:
+        errorMessage.value = t('login.permissionDenied')
+        break
+      case 500:
+        errorMessage.value = t('login.serverError')
+        break
+      default:
+        errorMessage.value = `${t('login.authFailure')} (Status: ${error.response.status})`
+    }
+  } finally {
+    loading.value = false
+  }
 }
+
+// 使用OTP码继续登录
+function loginWithOTP() {
+  closeMfaDialog()
+  login()
+}
+
+// 使用PassKey进行MFA验证
+async function verifyWithPassKey() {
+  if (!form.value.username) return
+
+  await handlePassKeyAuth(
+    { username: form.value.username },
+    val => (mfaPasskeyLoading.value = val),
+    async response => {
+      // 关闭MFA对话框
+      closeMfaDialog()
+      await handleLoginSuccess(response)
+    },
+  )
+}
+
+watch([mfaPasskeyLoading, errorMessage, () => form.value.otp_password], () => {
+  mfaDialogController?.updateProps(getMfaDialogProps())
+})
 
 // 自动登录
 onMounted(async () => {
@@ -215,6 +515,51 @@ onMounted(async () => {
   // 如果token存在，且保持登录状态为true，则跳转到首页
   if (token && remember) {
     router.push('/')
+    return
+  }
+
+  // 初始化 Conditional UI 的 PassKey 自动填充
+  await initConditionalPasskey()
+})
+
+// 初始化 Conditional UI 的 PassKey 自动填充
+async function initConditionalPasskey() {
+  // 检查浏览器是否支持 WebAuthn 和 Conditional UI
+  if (!window.PublicKeyCredential || !PublicKeyCredential.isConditionalMediationAvailable) {
+    return
+  }
+
+  try {
+    const available = await PublicKeyCredential.isConditionalMediationAvailable()
+    if (!available) {
+      return
+    }
+
+    // 安全防御：如果已存在 controller，先 abort 掉旧的，防止重复调用产生幽灵请求
+    if (conditionalAbortController) {
+      conditionalAbortController.abort()
+      conditionalAbortController = null
+    }
+
+    // 创建 AbortController 用于取消请求
+    conditionalAbortController = new AbortController()
+
+    // 启动 Conditional UI 模式的 PassKey 认证
+    await loginWithPassKey(true)
+  } catch (error) {
+    console.error('[PassKey] Failed to initialize Conditional UI:', error)
+  }
+}
+
+// 组件卸载时清理
+onUnmounted(() => {
+  if (conditionalAbortController) {
+    conditionalAbortController.abort()
+    conditionalAbortController = null
+  }
+  if (manualAbortController) {
+    manualAbortController.abort()
+    manualAbortController = null
   }
 })
 </script>
@@ -223,9 +568,9 @@ onMounted(async () => {
   <!-- 登录页面容器 -->
   <div class="relative flex min-h-screen flex-col items-center justify-center">
     <!-- 登录表单 -->
-    <div class="auth-wrapper d-flex align-center justify-center">
+    <div v-if="!mfaDialog" class="auth-wrapper d-flex align-center justify-center">
       <VCard
-        class="auth-card px-7 py-3 w-full h-full"
+        class="auth-card px-7 pt-3 w-full h-full"
         :class="{ 'glass-effect': !isTransparentTheme }"
         max-width="24rem"
         border
@@ -236,7 +581,7 @@ onMounted(async () => {
               <VImg :src="logo" width="64" height="64" />
             </div>
           </template>
-          <VCardTitle class="font-weight-bold text-2xl text-uppercase"> MoviePilot </VCardTitle>
+          <VCardTitle class="font-weight-bold text-3xl text-uppercase"> MoviePilot </VCardTitle>
 
           <!-- 语言切换按钮 -->
           <template #append>
@@ -268,7 +613,7 @@ onMounted(async () => {
           </template>
         </VCardItem>
         <VCardText>
-          <VForm ref="refForm" autocomplete="on" @submit.prevent="() => {}">
+          <VForm ref="refForm" autocomplete="on" @submit.prevent="login">
             <VRow>
               <!-- username -->
               <VCol cols="12">
@@ -278,9 +623,10 @@ onMounted(async () => {
                   :label="t('login.username')"
                   type="text"
                   name="username"
+                  id="username"
                   autocomplete="username"
                   :rules="[requiredValidator]"
-                  @input="fetchOTP"
+                  hide-details
                 />
               </VCol>
               <!-- password -->
@@ -289,15 +635,16 @@ onMounted(async () => {
                   v-model="form.password"
                   :label="t('login.password')"
                   :type="isPasswordVisible ? 'text' : 'password'"
-                  name="current-password"
+                  name="password"
+                  id="password"
                   autocomplete="current-password"
                   :append-inner-icon="isPasswordVisible ? 'mdi-eye-off-outline' : 'mdi-eye-outline'"
                   :rules="[requiredValidator]"
+                  hide-details
                   @click:append-inner="isPasswordVisible = !isPasswordVisible"
                 />
               </VCol>
-              <VCol cols="12">
-                <VTextField v-if="isOTP" v-model="form.otp_password" :label="t('login.otpCode')" type="input" />
+              <VCol cols="12" class="py-0">
                 <!-- remember me checkbox -->
                 <div class="d-flex align-center justify-space-between flex-wrap">
                   <VCheckbox v-model="form.remember" :label="t('login.stayLoggedIn')" required />
@@ -305,8 +652,26 @@ onMounted(async () => {
               </VCol>
               <VCol cols="12">
                 <!-- login button -->
-                <VBtn block type="submit" @click="login" prepend-icon="mdi-login" :loading="loading">
+                <VBtn block type="submit" prepend-icon="mdi-login" :loading="loading" size="large">
                   {{ t('login.login') }}
+                </VBtn>
+
+                <!-- or divider -->
+                <div class="or-divider my-4">
+                  <span class="or-divider-text">{{ t('login.orDivider') }}</span>
+                </div>
+
+                <!-- passkey login button -->
+                <VBtn
+                  block
+                  variant="outlined"
+                  color="success"
+                  class="passkey-btn"
+                  prepend-icon="material-symbols:passkey"
+                  :loading="passkeyLoading"
+                  @click="loginWithPassKey(false)"
+                >
+                  {{ t('login.loginWithPasskey') }}
                 </VBtn>
                 <VAlert v-if="errorMessage" type="error" variant="tonal" class="mt-3">
                   {{ errorMessage }}
@@ -341,5 +706,32 @@ onMounted(async () => {
 .glass-effect {
   backdrop-filter: blur(10px) !important;
   background: rgba(var(--v-theme-surface), 0.7) !important;
+}
+
+.or-divider {
+  position: relative;
+  display: flex;
+  align-items: center;
+  text-align: center;
+
+  &::before,
+  &::after {
+    flex: 1;
+    border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+    content: '';
+  }
+
+  .or-divider-text {
+    color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
+    font-size: 0.8125rem;
+    padding-inline: 12px;
+    white-space: nowrap;
+  }
+}
+
+.v-theme--light {
+  .passkey-btn.v-btn--variant-outlined {
+    color: rgb(86, 170, 0) !important;
+  }
 }
 </style>

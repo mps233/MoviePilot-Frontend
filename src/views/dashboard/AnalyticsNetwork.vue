@@ -3,11 +3,12 @@ import { useTheme } from 'vuetify'
 import { hexToRgb } from '@layouts/utils'
 import api from '@/api'
 import { useI18n } from 'vue-i18n'
-import { useBackgroundOptimization } from '@/composables/useBackgroundOptimization'
+import { useBackground } from '@/composables/useBackground'
+import { useKeepAliveRefresh } from '@/composables/useKeepAliveRefresh'
 
 // 国际化
 const { t } = useI18n()
-const { useDataRefresh } = useBackgroundOptimization()
+const { useDataRefresh } = useBackground()
 
 // 输入参数
 const props = defineProps({
@@ -28,8 +29,6 @@ const variableTheme = controlledComputed(
   () => vuetifyTheme.name.value,
   () => vuetifyTheme.current.value.variables,
 )
-
-const chartKey = ref(0)
 
 // 时间序列 - 上行和下行流量
 const series = ref([
@@ -160,19 +159,15 @@ async function getNetworkUsage() {
   }
 }
 
-// 使用优化的数据刷新定时器
-useDataRefresh(
+// 使用数据刷新定时器
+const { refresh } = useDataRefresh(
   'dashboard-network',
   getNetworkUsage,
   2000, // 2秒间隔
   true // 立即执行
 )
 
-onActivated(() => {
-  nextTick(() => {
-    chartKey.value += 1
-  })
-})
+useKeepAliveRefresh(refresh)
 </script>
 
 <template>
@@ -186,7 +181,7 @@ onActivated(() => {
           <VCardTitle>{{ t('dashboard.network') }}</VCardTitle>
         </VCardItem>
         <VCardText>
-          <VApexChart :key="chartKey" type="line" :options="chartOptions" :series="series" :height="150" />
+          <VApexChart type="line" :options="chartOptions" :series="series" :height="150" />
           <div class="d-flex justify-space-between">
             <p class="text-center font-weight-medium mb-0">
               <span class="text-warning">{{ t('dashboard.upload') }}</span

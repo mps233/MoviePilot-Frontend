@@ -3,7 +3,11 @@ import type { PropType } from 'vue'
 import { formatFileSize, formatDateDifference } from '@/@core/utils/formatters'
 import api from '@/api'
 import type { Context } from '@/api/types'
-import AddDownloadDialog from '../dialog/AddDownloadDialog.vue'
+import { getCachedSiteIcon } from '@/utils/siteIconCache'
+import { downloadedTorrentMap, markTorrentDownloaded } from '@/utils/torrentDownloadCache'
+import { openSharedDialog } from '@/composables/useSharedDialog'
+
+const AddDownloadDialog = defineAsyncComponent(() => import('../dialog/AddDownloadDialog.vue'))
 
 // 输入参数
 const props = defineProps({
@@ -22,37 +26,28 @@ const meta = ref(props.torrent?.meta_info)
 // 站点图标
 const siteIcon = ref('')
 
-// 站点图标加载状态
-const iconLoading = ref(false)
-const iconError = ref(false)
-
-// 存储是否已经下载过的记录
-const downloaded = ref<string[]>([])
-
-// 添加下载对话框
-const addDownloadDialog = ref(false)
+const isDownloaded = computed(() => Boolean(torrent.value?.enclosure && downloadedTorrentMap[torrent.value.enclosure]))
 
 // 查询站点图标
 async function getSiteIcon() {
-  if (!torrent?.value?.site || iconLoading.value) {
+  if (!torrent?.value?.site) {
     return
   }
 
-  iconLoading.value = true
-  iconError.value = false
-
   try {
-    const response = await api.get(`site/icon/${torrent.value.site}`)
-    if (response && response.data && response.data.icon) {
-      siteIcon.value = response.data.icon
-    } else {
-      iconError.value = true
-    }
+    siteIcon.value = await getCachedSiteIcon(torrent.value.site, async () => {
+      try {
+        const response = await api.get(`site/icon/${torrent.value?.site}`)
+
+        return response?.data?.icon || ''
+      } catch (error) {
+        console.error('Failed to load site icon:', error)
+        return ''
+      }
+    })
   } catch (error) {
     console.error('Failed to load site icon:', error)
-    iconError.value = true
-  } finally {
-    iconLoading.value = false
+    siteIcon.value = ''
   }
 }
 
@@ -77,19 +72,29 @@ function getPromotionChipClass(downloadVolumeFactor: number | undefined, uploadV
 // 询问并添加下载
 async function handleAddDownload() {
   // 打开下载对话框
-  addDownloadDialog.value = true
+  openSharedDialog(
+    AddDownloadDialog,
+    {
+      title: `${media.value?.title_year || meta.value?.name} ${meta.value?.season_episode || ''}`,
+      media: media.value,
+      torrent: torrent.value,
+    },
+    {
+      done: addDownloadSuccess,
+      error: addDownloadError,
+    },
+    { closeOn: ['close', 'done', 'error'] },
+  )
 }
 
 // 添加下载成功
 function addDownloadSuccess(url: string) {
-  addDownloadDialog.value = false
-  // 添加下载成功
-  downloaded.value.push(url)
+  markTorrentDownloaded(url)
 }
 
 // 添加下载失败
 function addDownloadError(error: string) {
-  addDownloadDialog.value = false
+  console.error(error)
 }
 
 // 打开种子详情页面
@@ -97,10 +102,16 @@ function openTorrentDetail() {
   window.open(torrent.value?.page_url, '_blank')
 }
 
-// 装载时查询站点图标
-onMounted(() => {
-  getSiteIcon()
-})
+watch(
+  () => props.torrent,
+  value => {
+    torrent.value = value?.torrent_info
+    media.value = value?.media_info
+    meta.value = value?.meta_info
+    getSiteIcon()
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -108,7 +119,7 @@ onMounted(() => {
     <VListItem
       :value="props.torrent?.torrent_info?.enclosure"
       class="pa-3 mb-2 rounded torrent-item transition-all duration-300 hover:-translate-y-1 overflow-hidden"
-      :class="{ 'border-start border-success border-3 opacity-85': downloaded.includes(torrent?.enclosure || '') }"
+      :class="{ 'border-start border-success border-3 opacity-85': isDownloaded }"
       @click="handleAddDownload"
     >
       <!-- 优惠标签 -->
@@ -140,7 +151,7 @@ onMounted(() => {
         </div>
       </template>
 
-      <VListItemTitle>
+      <VListItemTitle class="whitespace-normal">
         <div class="d-flex flex-row flex-wrap align-center mb-2">
           <span class="text-h6 font-weight-bold me-2">{{ media?.title ?? meta?.name }}</span>
           <VChip
@@ -153,12 +164,12 @@ onMounted(() => {
           </VChip>
         </div>
 
-        <div class="text-subtitle-2 font-weight-medium mb-2" :title="torrent?.title">
+        <div class="text-subtitle-2 font-weight-medium mb-2 break-all" :title="torrent?.title">
           {{ torrent?.title }}
         </div>
 
         <div
-          class="text-body-2 text-medium-emphasis mb-2"
+          class="text-body-2 text-medium-emphasis mb-2 break-all"
           :title="meta?.subtitle || torrent?.description || '暂无描述'"
         >
           {{ meta?.subtitle || torrent?.description || '暂无描述' }}
@@ -240,17 +251,6 @@ onMounted(() => {
         </div>
       </template>
     </VListItem>
-
-    <AddDownloadDialog
-      v-if="addDownloadDialog"
-      v-model="addDownloadDialog"
-      :title="`${media?.title_year || meta?.name} ${meta?.season_episode || ''}`"
-      :media="media"
-      :torrent="torrent"
-      @done="addDownloadSuccess"
-      @error="addDownloadError"
-      @close="addDownloadDialog = false"
-    />
   </div>
 </template>
 

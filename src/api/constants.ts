@@ -52,6 +52,10 @@ export const downloaderOptions = [
     value: 'transmission',
     title: i18n.global.t('setting.system.transmission'),
   },
+  {
+    value: 'rtorrent',
+    title: i18n.global.t('setting.system.rtorrent'),
+  },
 ]
 
 export const downloaderDict = downloaderOptions.reduce((dict, item) => {
@@ -65,6 +69,10 @@ export const mediaServerOptions = [
     title: i18n.global.t('setting.system.emby'),
   },
   {
+    value: 'zspace',
+    title: i18n.global.t('setting.system.zspace'),
+  },
+  {
     value: 'jellyfin',
     title: i18n.global.t('setting.system.jellyfin'),
   },
@@ -75,6 +83,10 @@ export const mediaServerOptions = [
   {
     value: 'trimemedia',
     title: i18n.global.t('setting.system.trimeMedia'),
+  },
+  {
+    value: 'ugreen',
+    title: i18n.global.t('setting.system.ugreen'),
   },
 ]
 
@@ -273,6 +285,10 @@ export const notificationSwitchOptions = [
   {
     title: i18n.global.t('notificationSwitch.plugin'),
     value: '插件',
+  },
+  {
+    title: i18n.global.t('notificationSwitch.agent'),
+    value: '智能体',
   },
   {
     title: i18n.global.t('notificationSwitch.other'),

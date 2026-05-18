@@ -58,6 +58,8 @@ export interface Subscribe {
   sites: number[]
   // 是否洗版，数字或者boolean
   best_version: any
+  // 是否只洗全集整包，数字或者boolean
+  best_version_full?: any
   // 使用 imdbid 搜索
   search_imdbid?: any
   // 当前优先级
@@ -314,6 +316,8 @@ export interface MediaInfo {
   production_countries?: any[]
   // 语种
   spoken_languages?: string[]
+  // 数字/实体发行日期
+  release_dates?: MediaRelease[]
   // 状态
   status?: string
   // 标签
@@ -366,6 +370,18 @@ export interface TmdbSeason {
   season_number?: number
   // 评分
   vote_average?: number
+}
+
+// 发行信息
+export interface MediaRelease {
+  // 发行日期
+  date: string
+  // 发行地区
+  iso_code: string
+  // 备注
+  note?: string
+  // 发行类型
+  type: number
 }
 
 // TMDB集信息
@@ -520,7 +536,7 @@ export interface SiteUserData {
   // 用户名
   username?: string
   // 用户ID
-  userid?: number
+  userid?: string
   // 用户等级
   user_level?: string
   // 加入时间
@@ -640,6 +656,17 @@ export interface Plugin {
   add_time?: number
   // 页面打开状态
   page_open?: boolean
+}
+
+// 插件侧栏全页导航项（与后端 PluginSidebarNavItem 对齐）
+export interface PluginSidebarNavItem {
+  plugin_id: string
+  nav_key: string
+  title: string
+  icon: string
+  section: 'start' | 'discovery' | 'subscribe' | 'organize' | 'system'
+  permission?: 'subscribe' | 'discovery' | 'search' | 'manage' | 'admin' | null
+  order: number
 }
 
 // 渲染结构
@@ -847,6 +874,16 @@ export interface User {
   nickname?: string
 }
 
+// 通行密钥
+export interface PassKey {
+  id: number
+  name: string
+  created_at: string
+  last_used_at?: string
+  aaguid?: string
+  transports?: string
+}
+
 // 存储空间
 export interface Storage {
   // 总空间
@@ -861,8 +898,8 @@ export interface MediaStatistic {
   movie_count: number
   // 电视剧总数
   tv_count: number
-  // 电视剧总集数
-  episode_count: number
+  // 电视剧总集数，未获取时为 null
+  episode_count: number | null
   // 用户数量
   user_count: number
 }
@@ -992,6 +1029,8 @@ export interface MediaServerPlayItem {
   percent?: number
   // 媒体服务器类型
   server_type?: string
+  // 图片是否需要Cookies
+  use_cookies?: boolean
 }
 
 // 媒体服务器媒体库
@@ -1014,6 +1053,8 @@ export interface MediaServerLibrary {
   link?: string
   // 媒体服务器类型
   server_type?: string
+  // 图片是否需要Cookies
+  use_cookies?: boolean
 }
 
 // 消息通知
@@ -1066,6 +1107,8 @@ export interface DownloaderConf {
   config: { [key: string]: any }
   // 是否启用
   enabled: boolean
+  // 路径映射
+  path_mapping?: Array<[storagePath: string, downloadPath: string]>
 }
 
 // 通知配置
@@ -1104,7 +1147,7 @@ export interface StorageConf {
 export interface MediaServerConf {
   // 名称
   name: string
-  // 类型 emby/jellyfin/plex
+  // 类型 emby/zspace/jellyfin/plex/trimemedia/ugreen
   type: string
   // 配置
   config: { [key: string]: any }
@@ -1270,6 +1313,57 @@ export interface TransferForm {
   library_category_folder?: boolean
   // 剧集组编号
   episode_group?: string
+  // 预览模式
+  preview?: boolean
+}
+
+// 手动整理请求
+export interface ManualTransferPayload extends TransferForm {}
+
+// 手动整理预览统计
+export interface ManualTransferPreviewSummary {
+  // 总数
+  total: number
+  // 成功数
+  success: number
+  // 失败数
+  failed: number
+}
+
+// 手动整理预览项
+export interface ManualTransferPreviewItem {
+  // 原始路径
+  source?: string
+  // 目标路径
+  target?: string
+  // 目标目录
+  target_dir?: string
+  // 是否成功
+  success?: boolean
+  // 提示信息
+  message?: string
+  // 媒体类型
+  type?: string
+  // 媒体标题
+  title?: string
+  // 季
+  season?: number | string
+  // 开始集
+  episode?: number | string
+  // 结束集
+  episode_end?: number | string
+  // Part
+  part?: string
+}
+
+// 手动整理预览数据
+export interface ManualTransferPreviewData {
+  // 统计信息
+  summary: ManualTransferPreviewSummary
+  // 预览结果
+  items: ManualTransferPreviewItem[]
+  // 额外消息
+  message?: string
 }
 
 // 整理队列
@@ -1408,4 +1502,26 @@ export interface SubscribeShareStatistics {
   share_count?: number
   // 总复用人次
   total_reuse_count?: number
+}
+
+// 通用API响应
+export interface ApiResponse<T = any> {
+  success: boolean
+  message?: string
+  data: T
+}
+
+// 分类规则
+export interface CategoryRule {
+  genre_ids?: string
+  original_language?: string
+  production_countries?: string
+  origin_country?: string
+  release_year?: string
+}
+
+// 分类配置
+export interface CategoryConfig {
+  movie?: { [key: string]: CategoryRule }
+  tv?: { [key: string]: CategoryRule }
 }

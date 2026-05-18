@@ -7,10 +7,12 @@ import { formatFileSize, formatDateDifference } from '@core/utils/formatters'
 import { useConfirm } from '@/composables/useConfirm'
 import { useGlobalSettingsStore } from '@/stores'
 import { usePWA } from '@/composables/usePWA'
+import { openSharedDialog } from '@/composables/useSharedDialog'
+
+const CacheReidentifyDialog = defineAsyncComponent(() => import('@/components/dialog/CacheReidentifyDialog.vue'))
 
 // 国际化
 const { t } = useI18n()
-
 
 // PWA模式检测
 const { appMode } = usePWA()
@@ -62,11 +64,9 @@ const selectedItems = ref<string[]>([])
 // 加载状态
 const loading = ref(false)
 
-// 重新识别对话框
-const reidentifyDialog = ref(false)
 const currentReidentifyItem = ref<TorrentCacheItem | null>(null)
-const tmdbId = ref<number | undefined>()
-const doubanId = ref<string | undefined>()
+
+let reidentifyDialogController: ReturnType<typeof openSharedDialog> | null = null
 
 const tableStyle = computed(() => {
   return appMode ? '' : 'height: calc(100vh - 21rem - env(safe-area-inset-bottom)'
@@ -176,20 +176,37 @@ async function deleteSingleItem(item: TorrentCacheItem) {
 // 打开重新识别对话框
 function openReidentifyDialog(item: TorrentCacheItem) {
   currentReidentifyItem.value = item
-  tmdbId.value = undefined
-  doubanId.value = undefined
-  reidentifyDialog.value = true
+  reidentifyDialogController?.close()
+  reidentifyDialogController = openSharedDialog(
+    CacheReidentifyDialog,
+    {
+      itemTitle: item.title,
+      loading: loading.value,
+      recognizeSource: globalSettings.RECOGNIZE_SOURCE,
+    },
+    {
+      close: () => {
+        reidentifyDialogController = null
+      },
+      confirm: performReidentify,
+      'update:modelValue': (value: boolean) => {
+        if (!value) reidentifyDialogController = null
+      },
+    },
+    { closeOn: ['close', 'update:modelValue'] },
+  )
 }
 
 // 重新识别
-async function performReidentify() {
+async function performReidentify(payload: { doubanId?: string; tmdbId?: number } = {}) {
   if (!currentReidentifyItem.value) return
 
   try {
     loading.value = true
+    reidentifyDialogController?.updateProps({ loading: true })
     const params: any = {}
-    if (tmdbId.value) params.tmdbid = tmdbId.value
-    if (doubanId.value) params.doubanid = doubanId.value
+    if (payload.tmdbId) params.tmdbid = payload.tmdbId
+    if (payload.doubanId) params.doubanid = payload.doubanId
 
     const res: any = await api.post(
       `torrent/cache/reidentify/${currentReidentifyItem.value.domain}/${currentReidentifyItem.value.hash}`,
@@ -201,12 +218,14 @@ async function performReidentify() {
 
     $toast.success(res.message || t('setting.cache.reidentifySuccess'))
     await loadCacheData()
-    reidentifyDialog.value = false
+    reidentifyDialogController?.close()
+    reidentifyDialogController = null
   } catch (e) {
     console.log(e)
     $toast.error(t('setting.cache.reidentifyFailed'))
   } finally {
     loading.value = false
+    reidentifyDialogController?.updateProps({ loading: false })
   }
 }
 
@@ -233,64 +252,91 @@ onMounted(() => {
 </script>
 
 <template>
-  <VCard>
-    <VCardItem>
-      <VCardTitle>{{ t('setting.cache.title') }}</VCardTitle>
-      <VCardSubtitle>{{ t('setting.cache.subtitle') }}</VCardSubtitle>
+  <div>
+    <!-- 工具栏统计信息和操作按钮 -->
+    <VCard class="mb-4">
+      <VCardItem>
+        <!-- 移动端垂直布局，桌面端水平布局 -->
+        <div class="d-flex flex-column flex-md-row align-center justify-space-between w-100 gap-4">
+          <!-- 左侧统计信息 -->
+          <div class="d-flex align-center justify-center justify-md-start gap-2 gap-md-6 w-100 w-md-auto">
+            <!-- 统计信息卡片 -->
+            <div class="d-flex gap-2 gap-md-4 flex-wrap justify-center justify-md-start">
+              <VCard variant="tonal" color="primary" class="pa-2 pa-md-3 flex-grow-1 flex-md-grow-0" style="min-width: 120px;">
+                <div class="d-flex align-center gap-2">
+                  <VIcon color="primary" size="small">mdi-database</VIcon>
+                  <div>
+                    <div class="text-h6 text-md-h6 font-weight-bold">{{ cacheData.count }}</div>
+                    <div class="text-caption text-medium-emphasis">{{ t('setting.cache.totalCount') }}</div>
+                  </div>
+                </div>
+              </VCard>
 
-      <template #append>
-        <div class="d-flex gap-2">
-          <VBtn icon color="primary" :loading="loading" @click="refreshCache">
-            <VIcon>mdi-refresh</VIcon>
-            <VTooltip activator="parent" location="bottom">{{ t('setting.cache.refresh') }}</VTooltip>
-          </VBtn>
+              <VCard variant="tonal" color="success" class="pa-2 pa-md-3 flex-grow-1 flex-md-grow-0" style="min-width: 120px;">
+                <div class="d-flex align-center gap-2">
+                  <VIcon color="success" size="small">mdi-web</VIcon>
+                  <div>
+                    <div class="text-h6 text-md-h6 font-weight-bold">{{ cacheData.sites }}</div>
+                    <div class="text-caption text-medium-emphasis">{{ t('setting.cache.siteCount') }}</div>
+                  </div>
+                </div>
+              </VCard>
+            </div>
+          </div>
 
-          <VBtn
-            icon
-            color="warning"
-            :loading="loading"
-            :disabled="selectedItems.length === 0"
-            @click="deleteSelectedItems"
-          >
-            <VIcon>mdi-delete-sweep</VIcon>
-            <VTooltip activator="parent" location="bottom"
-              >{{ t('setting.cache.deleteSelected') }} ({{ selectedItems.length }})</VTooltip
+          <!-- 右侧操作按钮 -->
+          <div class="d-flex gap-1 gap-md-2 flex-wrap justify-center justify-md-end">
+            <VBtn icon color="primary" :loading="loading" @click="refreshCache" size="small">
+              <VIcon size="small">mdi-refresh</VIcon>
+              <VTooltip activator="parent" location="bottom">{{ t('setting.cache.refresh') }}</VTooltip>
+            </VBtn>
+
+            <VBtn
+              icon
+              color="warning"
+              :loading="loading"
+              :disabled="selectedItems.length === 0"
+              @click="deleteSelectedItems"
+              size="small"
             >
-          </VBtn>
+              <VIcon size="small">mdi-delete-sweep</VIcon>
+              <VTooltip activator="parent" location="bottom"
+                >{{ t('setting.cache.deleteSelected') }} ({{ selectedItems.length }})</VTooltip
+              >
+            </VBtn>
 
-          <VBtn icon color="error" :loading="loading" @click="clearAllCache">
-            <VIcon>mdi-delete-variant</VIcon>
-            <VTooltip activator="parent" location="bottom">{{ t('setting.cache.clearAll') }}</VTooltip>
-          </VBtn>
+            <VBtn icon color="error" :loading="loading" @click="clearAllCache" size="small">
+              <VIcon size="small">mdi-delete-variant</VIcon>
+              <VTooltip activator="parent" location="bottom">{{ t('setting.cache.clearAll') }}</VTooltip>
+            </VBtn>
+          </div>
         </div>
-      </template>
-    </VCardItem>
+      </VCardItem>
+    </VCard>
 
     <!-- 筛选框 -->
-    <VCardText>
-      <VRow>
-        <VCol cols="6">
-          <VTextField
-            v-model="titleFilter"
-            :label="t('setting.cache.filterByTitle')"
-            prepend-inner-icon="mdi-magnify"
-            clearable
-            density="compact"
-          />
-        </VCol>
-        <VCol cols="6">
-          <VAutocomplete
-            v-model="siteFilter"
-            :label="t('setting.cache.filterBySite')"
-            :items="siteOptions"
-            prepend-inner-icon="mdi-web"
-            clearable
-            density="compact"
-            :placeholder="t('setting.cache.selectSite')"
-          />
-        </VCol>
-      </VRow>
-    </VCardText>
+    <VRow class="mb-4">
+      <VCol cols="6">
+        <VTextField
+          v-model="titleFilter"
+          :label="t('setting.cache.filterByTitle')"
+          prepend-inner-icon="mdi-magnify"
+          clearable
+          density="compact"
+        />
+      </VCol>
+      <VCol cols="6">
+        <VAutocomplete
+          v-model="siteFilter"
+          :label="t('setting.cache.filterBySite')"
+          :items="siteOptions"
+          prepend-inner-icon="mdi-web"
+          clearable
+          density="compact"
+          :placeholder="t('setting.cache.selectSite')"
+        />
+      </VCol>
+    </VRow>
 
     <!-- 缓存列表 -->
     <VDataTable
@@ -420,54 +466,5 @@ onMounted(() => {
         </div>
       </template>
     </VDataTable>
-  </VCard>
-
-  <!-- 重新识别对话框 -->
-  <DialogWrapper v-model="reidentifyDialog" scrollable max-width="35rem">
-    <VCard>
-      <VCardItem class="py-2">
-        <template #prepend>
-          <VIcon>mdi-text-recognition</VIcon>
-        </template>
-        <VCardTitle>{{ t('setting.cache.reidentifyDialog.title') }}</VCardTitle>
-        <VCardSubtitle>{{ currentReidentifyItem?.title }}</VCardSubtitle>
-      </VCardItem>
-      <VDialogCloseBtn @click="reidentifyDialog = false" />
-      <VDivider />
-      <VCardText>
-        <VRow>
-          <VCol cols="12">
-            <VTextField
-              v-if="globalSettings.RECOGNIZE_SOURCE === 'themoviedb'"
-              v-model="tmdbId"
-              :label="t('setting.cache.reidentifyDialog.tmdbId')"
-              :hint="t('setting.cache.reidentifyDialog.tmdbIdHint')"
-              clearable
-              prepend-inner-icon="mdi-id-card"
-              persistent-hint
-            />
-            <VTextField
-              v-else
-              v-model="doubanId"
-              :label="t('setting.cache.reidentifyDialog.doubanId')"
-              :hint="t('setting.cache.reidentifyDialog.doubanIdHint')"
-              clearable
-              prepend-inner-icon="mdi-id-card"
-              persistent-hint
-            />
-          </VCol>
-        </VRow>
-        <VAlert type="info" variant="tonal" class="mt-4">
-          {{ t('setting.cache.reidentifyDialog.autoHint') }}
-        </VAlert>
-      </VCardText>
-
-      <VCardActions>
-        <VSpacer />
-        <VBtn color="primary" :loading="loading" prepend-icon="mdi-check" @click="performReidentify">
-          {{ t('setting.cache.reidentifyDialog.confirm') }}
-        </VBtn>
-      </VCardActions>
-    </VCard>
-  </DialogWrapper>
+  </div>
 </template>

@@ -4,6 +4,14 @@ import FileToolbar from './filebrowser/FileToolbar.vue'
 import FileNavigator from './filebrowser/FileNavigator.vue'
 import type { EndPoints, FileItem, StorageConf } from '@/api/types'
 import { storageIconDict } from '@/api/constants'
+import type { AxiosInstance } from 'axios'
+import { useDynamicButton } from '@/composables/useDynamicButton'
+import { usePWA } from '@/composables/usePWA'
+
+// LocalStorage keys
+const SORT_KEY = 'fileBrowser.sort'
+const SHOW_TREE_KEY = 'fileBrowser.showDirTree'
+const NAV_WIDTH_KEY = 'fileBrowser.navigatorWidth'
 
 // 输入参数
 const props = defineProps({
@@ -11,7 +19,7 @@ const props = defineProps({
   tree: Boolean,
   endpoints: Object as PropType<EndPoints>,
   axios: {
-    type: Function,
+    type: Object as PropType<AxiosInstance>,
     required: true,
   },
   axiosconfig: Object,
@@ -23,10 +31,17 @@ const props = defineProps({
     type: Array as PropType<FileItem[]>,
     default: () => [],
   },
+  active: {
+    type: Boolean,
+    default: true,
+  },
 })
 
 // 对外事件
 const emit = defineEmits(['pathchanged'])
+const route = useRoute()
+const { appMode } = usePWA()
+const toolbarRef = ref<InstanceType<typeof FileToolbar> | null>(null)
 
 const fileIcons = {
   // 压缩包
@@ -117,23 +132,46 @@ const fileIcons = {
   other: 'mdi-file-outline',
 }
 
+function openNewFolderDialog() {
+  toolbarRef.value?.openNewFolderDialog()
+}
+
+const showFloatingNewFolderAction = computed(() => route.path === '/filemanager')
+
+useDynamicButton({
+  icon: 'mdi-folder-plus-outline',
+  onClick: openNewFolderDialog,
+  show: computed(() => appMode.value && showFloatingNewFolderAction.value),
+})
+
 // 加载次数
 const loading = ref(0)
-// 当前存储
-const activeStorage = ref('local')
+
 // 刷新
 const refreshPending = ref(false)
-// 排序
-const sort = ref('name')
+// 排序 - 从localStorage恢复
+const sort = ref(localStorage.getItem(SORT_KEY) || 'name')
 
-// 是否显示目录树
-const showDirTree = ref(false)
+// 是否显示目录树 - 从localStorage恢复
+const showDirTree = ref(localStorage.getItem(SHOW_TREE_KEY) === 'true')
 
-// 拖动分隔条相关
-const navigatorWidth = ref(280) // 初始宽度
+// 拖动分隔条相关 - 从localStorage恢复宽度
+const navigatorWidth = ref(parseInt(localStorage.getItem(NAV_WIDTH_KEY) || '280'))
 const isDragging = ref(false)
 const dragStartX = ref(0)
 const dragStartWidth = ref(0)
+
+watch(sort, (val) => {
+  localStorage.setItem(SORT_KEY, val)
+})
+
+watch(showDirTree, (val) => {
+  localStorage.setItem(SHOW_TREE_KEY, String(val))
+})
+
+watch(navigatorWidth, (val) => {
+  localStorage.setItem(NAV_WIDTH_KEY, String(val))
+})
 
 // 计算属性
 const storagesArray = computed(() => {
@@ -144,15 +182,15 @@ const storagesArray = computed(() => {
   }))
 })
 
+
 // 方法
-function loadingChanged(loading: number) {
-  if (loading) loading++
-  else if (loading > 0) loading--
+function loadingChanged(isLoading: number) {
+  if (isLoading) loading.value++
+  else if (loading.value > 0) loading.value--
 }
 
 // 存储切换
 async function storageChanged(storage: string) {
-  activeStorage.value = storage
   emit('pathchanged', { storage: storage, path: '/', fileid: 'root' })
 }
 
@@ -235,14 +273,16 @@ function stopDrag() {
 
 <template>
   <div class="mx-auto" :loading="loading > 0">
-    <div v-if="activeStorage && item">
+    <div v-if="item">
       <FileToolbar
+        ref="toolbarRef"
+        :sort="sort"
         :item="item"
         :itemstack="itemstack"
         :storages="storagesArray"
-        :storage="activeStorage"
         :endpoints="endpoints"
         :axios="axios"
+        :show-new-folder-button="!showFloatingNewFolderAction"
         @storagechanged="storageChanged"
         @pathchanged="pathChanged"
         @foldercreated="refreshPending = true"
@@ -251,7 +291,7 @@ function stopDrag() {
       <div class="flex">
         <FileNavigator
           v-if="showDirTree"
-          :storage="activeStorage"
+          :storage="item.storage"
           :currentPath="item.path"
           :items="fileListItems"
           :endpoints="endpoints"
@@ -266,13 +306,13 @@ function stopDrag() {
         </div>
         <FileList
           :item="item"
-          :storage="activeStorage"
           :icons="fileIcons"
           :endpoints="endpoints"
           :axios="axios"
           :refreshpending="refreshPending"
           :sort="sort"
           :showTree="showDirTree"
+          :active="active"
           :style="{ flex: 1 }"
           @pathchanged="pathChanged"
           @loading="loadingChanged"
@@ -285,6 +325,18 @@ function stopDrag() {
       </div>
     </div>
   </div>
+
+  <Teleport to="body" v-if="!appMode && showFloatingNewFolderAction">
+    <div class="compact-fab-stack">
+      <VFab
+        icon="mdi-folder-plus-outline"
+        color="primary"
+        appear
+        class="compact-fab compact-fab--primary"
+        @click="openNewFolderDialog"
+      />
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>

@@ -1,27 +1,42 @@
 <!-- eslint-disable sonarjs/no-duplicate-string -->
 <script lang="ts" setup>
 import { useToast } from 'vue-toastification'
-import { VRow } from 'vuetify/lib/components/index.mjs'
-import draggable from 'vuedraggable'
 import api from '@/api'
 import { DownloaderConf, MediaServerConf } from '@/api/types'
 import DownloaderCard from '@/components/cards/DownloaderCard.vue'
 import MediaServerCard from '@/components/cards/MediaServerCard.vue'
 import { copyToClipboard } from '@/@core/utils/navigator'
-import ProgressDialog from '@/components/dialog/ProgressDialog.vue'
 import { useI18n } from 'vue-i18n'
 import { downloaderOptions, mediaServerOptions } from '@/api/constants'
-import { useDisplay } from 'vuetify'
+import { useDisplay, useTheme } from 'vuetify'
+import { useLlmProviderDirectory } from '@/composables/useLlmProviderDirectory'
+import { useSilentSettingRefresh } from '@/composables/useSilentSettingRefresh'
+import { openSharedDialog } from '@/composables/useSharedDialog'
 
 const display = useDisplay()
+const theme = useTheme()
+
+const isTransparentTheme = computed(() => theme.name.value === 'transparent')
 
 // 国际化
 const { t } = useI18n()
+
+const props = defineProps({
+  active: {
+    type: Boolean,
+    default: true,
+  },
+})
+
+// 下载器/媒体服务器排序按需加载，降低系统设置页入口解析量。
+const Draggable = defineAsyncComponent(() => import('vuedraggable').then(module => module.default))
+const LlmProviderAuthDialog = defineAsyncComponent(() => import('@/components/dialog/LlmProviderAuthDialog.vue'))
 
 // 系统设置项
 const SystemSettings = ref<any>({
   // 基础设置
   Basic: {
+    DB_TYPE: 'sqlite',
     APP_DOMAIN: null,
     API_TOKEN: null,
     WALLPAPER: 'tmdb',
@@ -30,6 +45,35 @@ const SystemSettings = ref<any>({
     GITHUB_TOKEN: null,
     OCR_HOST: null,
     CUSTOMIZE_WALLPAPER_API_URL: null,
+    AI_AGENT_ENABLE: false,
+    AI_AGENT_GLOBAL: false,
+    AI_AGENT_VERBOSE: false,
+    AI_AGENT_JOB_INTERVAL: 24,
+    LLM_PROVIDER: 'deepseek',
+    LLM_MODEL: 'deepseek-chat',
+    LLM_THINKING_LEVEL: 'off',
+    LLM_SUPPORT_IMAGE_INPUT: false,
+    LLM_SUPPORT_AUDIO_INPUT: false,
+    LLM_SUPPORT_AUDIO_OUTPUT: false,
+    LLM_API_KEY: null,
+    LLM_BASE_URL: 'https://api.deepseek.com',
+    LLM_BASE_URL_PRESET: null,
+    AUDIO_INPUT_PROVIDER: 'openai',
+    AUDIO_INPUT_API_KEY: null,
+    AUDIO_INPUT_BASE_URL: null,
+    AUDIO_INPUT_MODEL: 'gpt-4o-mini-transcribe',
+    AUDIO_INPUT_LANGUAGE: 'zh',
+    AUDIO_OUTPUT_PROVIDER: 'openai',
+    AUDIO_OUTPUT_API_KEY: null,
+    AUDIO_OUTPUT_BASE_URL: null,
+    AUDIO_OUTPUT_MODEL: 'gpt-4o-mini-tts',
+    AUDIO_OUTPUT_VOICE: 'alloy',
+    AUDIO_OUTPUT_INCLUDE_TEXT: false,
+    AI_AGENT_RETRY_TRANSFER: false,
+    AI_RECOMMEND_ENABLED: false,
+    AI_RECOMMEND_USER_PREFERENCE: null,
+    AI_RECOMMEND_MAX_ITEMS: 50,
+    LLM_MAX_CONTEXT_TOKENS: 64,
   },
   // 高级系统设置
   Advanced: {
@@ -43,7 +87,14 @@ const SystemSettings = ref<any>({
     DB_WAL_ENABLE: false,
     AUTO_UPDATE_RESOURCE: true,
     MOVIEPILOT_AUTO_UPDATE: false,
+    DATA_CLEANUP_ENABLE: false,
+    DATA_CLEANUP_MESSAGE_DAYS: 90,
+    DATA_CLEANUP_DOWNLOAD_HISTORY_DAYS: 180,
+    DATA_CLEANUP_SITE_USERDATA_DAYS: 180,
+    DATA_CLEANUP_TRANSFER_HISTORY_DAYS: 365 * 3,
     // 媒体
+    RECOGNIZE_PLUGIN_FIRST: false,
+    MEDIA_RECOGNIZE_SHARE: true,
     TMDB_API_DOMAIN: null,
     TMDB_IMAGE_DOMAIN: null,
     TMDB_LOCALE: null,
@@ -68,32 +119,65 @@ const SystemSettings = ref<any>({
     LOG_FILE_FORMAT: '【%(levelname)s】%(asctime)s - %(message)s',
     // 实验室
     PLUGIN_AUTO_RELOAD: false,
+    PLUGIN_LOCAL_REPO_PATHS: '',
     ENCODING_DETECTION_PERFORMANCE_MODE: true,
+    TRANSFER_THREADS: 1,
   },
 })
 
-// 刮削开关设置
-const ScrapingSwitchs = ref<any>({
-  movie_nfo: true, // 电影NFO
-  movie_poster: true, // 电影海报
-  movie_backdrop: true, // 电影背景图
-  movie_logo: true, // 电影Logo
-  movie_disc: true, // 电影光盘图
-  movie_banner: true, // 电影横幅图
-  movie_thumb: true, // 电影缩略图
-  tv_nfo: true, // 电视剧NFO
-  tv_poster: true, // 电视剧海报
-  tv_backdrop: true, // 电视剧背景图
-  tv_banner: true, // 电视剧横幅图
-  tv_logo: true, // 电视剧Logo
-  tv_thumb: true, // 电视剧缩略图
-  season_nfo: true, // 季NFO
-  season_poster: true, // 季海报
-  season_banner: true, // 季横幅图
-  season_thumb: true, // 季缩略图
-  episode_nfo: true, // 集NFO
-  episode_thumb: true, // 集缩略图
-})
+const audioProviderItems = computed(() => [
+  { title: t('setting.system.audioProviderOpenAiAudio'), value: 'openai' },
+  { title: t('setting.system.audioProviderChatAudio'), value: 'openai_chat_audio' },
+  { title: t('setting.system.audioProviderMimo'), value: 'mimo' },
+])
+
+// 刮削配置
+const scrapingConfig = [
+  {
+    section: 'movie',
+    items: [
+      { key: 'movie_nfo', label: 'setting.system.movieNfo' },
+      { key: 'movie_poster', label: 'setting.system.moviePoster' },
+      { key: 'movie_backdrop', label: 'setting.system.movieBackdrop' },
+      { key: 'movie_logo', label: 'setting.system.movieLogo' },
+      { key: 'movie_disc', label: 'setting.system.movieDisc' },
+      { key: 'movie_banner', label: 'setting.system.movieBanner' },
+      { key: 'movie_thumb', label: 'setting.system.movieThumb' },
+    ],
+  },
+  {
+    section: 'tv',
+    items: [
+      { key: 'tv_nfo', label: 'setting.system.tvNfo' },
+      { key: 'tv_poster', label: 'setting.system.tvPoster' },
+      { key: 'tv_backdrop', label: 'setting.system.tvBackdrop' },
+      { key: 'tv_banner', label: 'setting.system.tvBanner' },
+      { key: 'tv_logo', label: 'setting.system.tvLogo' },
+      { key: 'tv_thumb', label: 'setting.system.tvThumb' },
+    ],
+  },
+  {
+    section: 'season',
+    items: [
+      { key: 'season_nfo', label: 'setting.system.seasonNfo' },
+      { key: 'season_poster', label: 'setting.system.seasonPoster' },
+      { key: 'season_banner', label: 'setting.system.seasonBanner' },
+      { key: 'season_thumb', label: 'setting.system.seasonThumb' },
+    ],
+  },
+  {
+    section: 'episode',
+    items: [
+      { key: 'episode_nfo', label: 'setting.system.episodeNfo' },
+      { key: 'episode_thumb', label: 'setting.system.episodeThumb' },
+    ],
+  },
+]
+
+// 刮削策略设置
+const ScrapingPolicies = ref<Record<string, 'skip' | 'missingOnly' | 'overwrite'>>(
+  Object.fromEntries(scrapingConfig.flatMap(section => section.items.map(item => [item.key, 'missingOnly']))),
+)
 
 // 是否发送请求的总开关
 const isRequest = ref(true)
@@ -107,11 +191,262 @@ const downloaders = ref<DownloaderConf[]>([])
 // 提示框
 const $toast = useToast()
 
-// 进度框
-const progressDialog = ref(false)
-
 // 高级设置对话框
 const advancedDialog = ref(false)
+
+const savingBasic = ref(false)
+const testingLlm = ref(false)
+
+// 智能助手配置项较多，默认收起以降低基础设置页的视觉占用。
+const aiAgentSettingsCollapsed = ref(true)
+
+type LlmSettingsSnapshot = {
+  AI_AGENT_ENABLE: boolean
+  LLM_PROVIDER: string
+  LLM_MODEL: string
+  LLM_THINKING_LEVEL: string
+  LLM_API_KEY: string
+  LLM_BASE_URL: string
+  LLM_BASE_URL_PRESET: string
+}
+
+let llmTestRequestId = 0
+let llmTestAbortController: AbortController | null = null
+
+const llmProviderRef = computed({
+  get: () => String(SystemSettings.value.Basic.LLM_PROVIDER ?? ''),
+  set: value => {
+    SystemSettings.value.Basic.LLM_PROVIDER = value || ''
+  },
+})
+
+const llmApiKeyRef = computed({
+  get: () => String(SystemSettings.value.Basic.LLM_API_KEY ?? ''),
+  set: value => {
+    SystemSettings.value.Basic.LLM_API_KEY = value || ''
+  },
+})
+
+const llmBaseUrlRef = computed({
+  get: () => String(SystemSettings.value.Basic.LLM_BASE_URL ?? ''),
+  set: value => {
+    SystemSettings.value.Basic.LLM_BASE_URL = value || ''
+  },
+})
+
+const llmBaseUrlPresetRef = computed({
+  get: () => String(SystemSettings.value.Basic.LLM_BASE_URL_PRESET ?? ''),
+  set: value => {
+    SystemSettings.value.Basic.LLM_BASE_URL_PRESET = value || ''
+  },
+})
+
+const llmModelRef = computed({
+  get: () => String(SystemSettings.value.Basic.LLM_MODEL ?? ''),
+  set: value => {
+    SystemSettings.value.Basic.LLM_MODEL = value || ''
+  },
+})
+
+const llmMaxContextRef = computed({
+  get: () => Number(SystemSettings.value.Basic.LLM_MAX_CONTEXT_TOKENS ?? 0),
+  set: value => {
+    SystemSettings.value.Basic.LLM_MAX_CONTEXT_TOKENS = value || 0
+  },
+})
+
+const {
+  providerItems: llmProviderItems,
+  baseUrlPresetItems: llmBaseUrlPresetItems,
+  models: llmModels,
+  selectedProvider: selectedLlmProvider,
+  selectedModel: selectedLlmModel,
+  loadingProviders: loadingLlmProviders,
+  loadingModels,
+  providerConnected,
+  showBaseUrlField,
+  showApiKeyField,
+  canRefreshModels,
+  setBaseUrlPreset,
+  authDialogVisible,
+  authPolling,
+  authPopupBlocked,
+  authSession,
+  handleProviderSelection,
+  applyModelMetadata,
+  loadProviders: loadLlmProviders,
+  loadModels: loadLlmModels,
+  openAuthPage,
+  startAuth: startLlmProviderAuth,
+  pollAuthSession,
+  disconnectAuth: disconnectLlmProviderAuth,
+  closeAuthDialog,
+} = useLlmProviderDirectory({
+  provider: llmProviderRef,
+  apiKey: llmApiKeyRef,
+  baseUrl: llmBaseUrlRef,
+  baseUrlPreset: llmBaseUrlPresetRef,
+  model: llmModelRef,
+  maxContextTokens: llmMaxContextRef,
+})
+
+let authDialogController: ReturnType<typeof openSharedDialog> | null = null
+
+// 生成 LLM 授权共享弹窗所需的最新状态。
+function getProviderAuthDialogProps() {
+  return {
+    authSession: authSession.value,
+    polling: authPolling.value,
+    popupBlocked: authPopupBlocked.value,
+  }
+}
+
+// 打开或刷新 LLM 授权共享弹窗。
+function openProviderAuthDialog() {
+  const dialogProps = getProviderAuthDialogProps()
+  if (authDialogController) {
+    authDialogController.updateProps(dialogProps)
+    return
+  }
+
+  authDialogController = openSharedDialog(
+    LlmProviderAuthDialog,
+    dialogProps,
+    {
+      close: () => {
+        closeAuthDialog()
+        authDialogController = null
+      },
+      openAuthPage,
+      poll: () => {
+        void pollAuthSession()
+      },
+      'update:modelValue': (value: boolean) => {
+        if (!value) {
+          closeAuthDialog()
+          authDialogController = null
+        }
+      },
+    },
+    { closeOn: ['close', 'update:modelValue'] },
+  )
+}
+
+// 关闭 LLM 授权共享弹窗控制器。
+function closeProviderAuthDialog() {
+  authDialogController?.close()
+  authDialogController = null
+}
+
+function buildLlmSnapshot(): LlmSettingsSnapshot {
+  return {
+    AI_AGENT_ENABLE: Boolean(SystemSettings.value.Basic.AI_AGENT_ENABLE),
+    LLM_PROVIDER: String(SystemSettings.value.Basic.LLM_PROVIDER ?? ''),
+    LLM_MODEL: String(SystemSettings.value.Basic.LLM_MODEL ?? ''),
+    LLM_THINKING_LEVEL: String(SystemSettings.value.Basic.LLM_THINKING_LEVEL ?? 'off'),
+    LLM_API_KEY: String(SystemSettings.value.Basic.LLM_API_KEY ?? ''),
+    LLM_BASE_URL: String(SystemSettings.value.Basic.LLM_BASE_URL ?? ''),
+    LLM_BASE_URL_PRESET: String(SystemSettings.value.Basic.LLM_BASE_URL_PRESET ?? ''),
+  }
+}
+
+function buildLlmSnapshotKey(snapshot: LlmSettingsSnapshot) {
+  return JSON.stringify(snapshot)
+}
+
+function buildLlmTestPayload(snapshot: LlmSettingsSnapshot) {
+  return {
+    enabled: snapshot.AI_AGENT_ENABLE,
+    provider: snapshot.LLM_PROVIDER.trim(),
+    model: snapshot.LLM_MODEL.trim(),
+    thinking_level: snapshot.LLM_THINKING_LEVEL.trim(),
+    api_key: snapshot.LLM_API_KEY.trim(),
+    base_url: snapshot.LLM_BASE_URL.trim(),
+    base_url_preset: snapshot.LLM_BASE_URL_PRESET.trim(),
+  }
+}
+
+function normalizeThinkingLevelValue(value?: unknown) {
+  const normalized = String(value ?? '')
+    .trim()
+    .toLowerCase()
+  if (!normalized) return ''
+
+  const aliasMap: Record<string, string> = {
+    none: 'off',
+    disabled: 'off',
+    disable: 'off',
+    enabled: 'auto',
+    enable: 'auto',
+    default: 'auto',
+    dynamic: 'auto',
+  }
+
+  return aliasMap[normalized] || normalized
+}
+
+function resolveThinkingLevelValue(data?: Record<string, any>) {
+  const explicit = normalizeThinkingLevelValue(data?.LLM_THINKING_LEVEL)
+  if (explicit) return explicit
+
+  const legacyEffort = normalizeThinkingLevelValue(data?.LLM_REASONING_EFFORT)
+  if (data?.LLM_DISABLE_THINKING === true) return 'off'
+  if (data?.LLM_DISABLE_THINKING === false) return legacyEffort || 'auto'
+  return legacyEffort || 'off'
+}
+
+function showLlmTestFailedToast(message?: string) {
+  const normalizedMessage = String(message ?? '').trim()
+  if (normalizedMessage) {
+    $toast.error(t('setting.system.llmTestFailedToastWithMessage', { message: normalizedMessage }))
+    return
+  }
+  $toast.error(t('setting.system.llmTestFailedToast'))
+}
+
+function invalidateLlmTestState() {
+  llmTestRequestId += 1
+  if (llmTestAbortController) {
+    llmTestAbortController.abort()
+    llmTestAbortController = null
+  }
+  testingLlm.value = false
+}
+
+const currentLlmSnapshot = computed(() => buildLlmSnapshot())
+const currentLlmSnapshotKey = computed(() => buildLlmSnapshotKey(currentLlmSnapshot.value))
+const llmProviderAuthMethods = computed(() => selectedLlmProvider.value?.oauth_methods || [])
+const llmProviderAuthLabel = computed(() => selectedLlmProvider.value?.auth_status?.label || '')
+const selectedLlmModelInfo = computed(() => {
+  if (!selectedLlmModel.value?.context_tokens_k) return ''
+  return t('setting.system.llmModelResolvedHint', {
+    context: selectedLlmModel.value.context_tokens_k,
+    source: selectedLlmModel.value.source || 'models.dev',
+  })
+})
+
+const canTestLlm = computed(() => {
+  const snapshot = currentLlmSnapshot.value
+  return (
+    snapshot.AI_AGENT_ENABLE &&
+    Boolean(snapshot.LLM_PROVIDER.trim()) &&
+    (Boolean(snapshot.LLM_API_KEY.trim()) || providerConnected.value) &&
+    Boolean(snapshot.LLM_MODEL.trim()) &&
+    !savingBasic.value &&
+    !testingLlm.value
+  )
+})
+
+const thinkingLevelItems = computed(() => [
+  { title: t('setting.system.llmThinkingLevelOff'), value: 'off' },
+  { title: t('setting.system.llmThinkingLevelAuto'), value: 'auto' },
+  { title: t('setting.system.llmThinkingLevelMinimal'), value: 'minimal' },
+  { title: t('setting.system.llmThinkingLevelLow'), value: 'low' },
+  { title: t('setting.system.llmThinkingLevelMedium'), value: 'medium' },
+  { title: t('setting.system.llmThinkingLevelHigh'), value: 'high' },
+  { title: t('setting.system.llmThinkingLevelMax'), value: 'max' },
+  { title: t('setting.system.llmThinkingLevelXhigh'), value: 'xhigh' },
+])
 
 const activeTab = ref('system')
 
@@ -145,8 +480,51 @@ const logLevelItems = [
   { title: t('setting.system.logLevelItems.critical'), value: 'CRITICAL' },
 ]
 
+const dataCleanupFieldRules = [
+  (v: any) => v === 0 || !!v || t('setting.system.dataCleanupDaysRequired'),
+  (v: any) => v >= 0 || t('setting.system.dataCleanupDaysMin'),
+]
+
 // 安全域名添加变量
 const newSecurityDomain = ref('')
+
+// 加载 LLM 模型列表与 provider 目录
+async function refreshLlmModels(forceRefresh = true) {
+  try {
+    await loadLlmModels(forceRefresh)
+  } catch (error) {
+    $toast.error(error instanceof Error ? error.message : String(error))
+    console.log(error)
+  }
+}
+
+async function handleLlmProviderChanged() {
+  handleProviderSelection(true)
+  if (canRefreshModels.value) {
+    await refreshLlmModels(false)
+  }
+}
+
+function handleLlmModelChanged() {
+  applyModelMetadata()
+}
+
+async function startProviderAuth(methodId: string) {
+  try {
+    await startLlmProviderAuth(methodId)
+  } catch (error) {
+    $toast.error(error instanceof Error ? error.message : String(error))
+  }
+}
+
+async function disconnectProviderAuth() {
+  try {
+    await disconnectLlmProviderAuth()
+    $toast.success(t('setting.system.llmProviderDisconnected'))
+  } catch (error) {
+    $toast.error(error instanceof Error ? error.message : String(error))
+  }
+}
 
 // 添加安全域名
 function addSecurityDomain() {
@@ -229,6 +607,7 @@ async function saveMediaServerSetting() {
 
 // 加载系统设置
 async function loadSystemSettings() {
+  invalidateLlmTestState()
   try {
     const result: { [key: string]: any } = await api.get('system/env')
     if (result.success) {
@@ -238,6 +617,8 @@ async function loadSystemSettings() {
           if (result.data.hasOwnProperty(key)) (SystemSettings.value[sectionKey] as any)[key] = result.data[key]
         })
       }
+      SystemSettings.value.Basic.LLM_THINKING_LEVEL = resolveThinkingLevelValue(result.data)
+      await loadLlmProviders()
     }
   } catch (error) {
     console.log(error)
@@ -262,8 +643,56 @@ async function saveSystemSetting(value: { [key: string]: any }) {
 
 // 保存基础设置
 async function saveBasicSettings() {
-  if (await saveSystemSetting(SystemSettings.value.Basic)) {
-    $toast.success(t('setting.system.basicSaveSuccess'))
+  savingBasic.value = true
+  try {
+    if (await saveSystemSetting(SystemSettings.value.Basic)) {
+      $toast.success(t('setting.system.basicSaveSuccess'))
+    }
+  } finally {
+    savingBasic.value = false
+  }
+}
+
+async function testLlmConnection() {
+  if (!canTestLlm.value) return
+
+  const snapshot = buildLlmSnapshot()
+  const snapshotKey = buildLlmSnapshotKey(snapshot)
+  const payload = buildLlmTestPayload(snapshot)
+  const requestId = ++llmTestRequestId
+  if (llmTestAbortController) llmTestAbortController.abort()
+  const abortController = new AbortController()
+  llmTestAbortController = abortController
+
+  testingLlm.value = true
+  try {
+    const result: { [key: string]: any } = await api.post('llm/test', payload, {
+      signal: abortController.signal,
+    })
+    if (
+      requestId !== llmTestRequestId ||
+      abortController.signal.aborted ||
+      currentLlmSnapshotKey.value !== snapshotKey
+    ) {
+      return
+    }
+
+    if (result?.success) $toast.success(t('setting.system.llmTestSuccessToast'))
+    else showLlmTestFailedToast(result?.message)
+  } catch (error) {
+    if (
+      requestId !== llmTestRequestId ||
+      abortController.signal.aborted ||
+      currentLlmSnapshotKey.value !== snapshotKey
+    ) {
+      return
+    }
+    showLlmTestFailedToast(error instanceof Error ? error.message : String(error))
+    console.log(error)
+  } finally {
+    if (requestId !== llmTestRequestId) return
+    if (llmTestAbortController === abortController) llmTestAbortController = null
+    testingLlm.value = false
   }
 }
 
@@ -440,7 +869,14 @@ async function loadScrapingSwitchs() {
   try {
     const result: { [key: string]: any } = await api.get('system/setting/ScrapingSwitchs')
     if (result.success && result.data?.value) {
-      ScrapingSwitchs.value = { ...ScrapingSwitchs.value, ...result.data.value }
+      const loadedSwitches = result.data.value
+      for (const key in loadedSwitches) {
+        if (typeof loadedSwitches[key] === 'boolean') {
+          // 兼容旧数据
+          loadedSwitches[key] = loadedSwitches[key] ? 'missingOnly' : 'skip'
+        }
+      }
+      ScrapingPolicies.value = { ...ScrapingPolicies.value, ...loadedSwitches }
     }
   } catch (error) {
     console.log(error)
@@ -450,7 +886,7 @@ async function loadScrapingSwitchs() {
 // 保存刮削开关设置
 async function saveScrapingSwitchs() {
   try {
-    const result: { [key: string]: any } = await api.post('system/setting/ScrapingSwitchs', ScrapingSwitchs.value)
+    const result: { [key: string]: any } = await api.post('system/setting/ScrapingSwitchs', ScrapingPolicies.value)
     if (result.success) {
       return true
     } else {
@@ -465,12 +901,11 @@ async function saveScrapingSwitchs() {
 }
 
 // 加载数据
-onMounted(() => {
-  loadDownloaderSetting()
-  loadMediaServerSetting()
-  loadSystemSettings()
-  loadScrapingSwitchs()
-})
+async function loadPageData() {
+  await Promise.all([loadDownloaderSetting(), loadMediaServerSetting(), loadSystemSettings(), loadScrapingSwitchs()])
+}
+
+onMounted(loadPageData)
 
 onActivated(async () => {
   isRequest.value = true
@@ -479,16 +914,40 @@ onActivated(async () => {
 onDeactivated(() => {
   isRequest.value = false
 })
+
+onBeforeUnmount(() => {
+  invalidateLlmTestState()
+})
+
+watch(authDialogVisible, visible => {
+  if (visible) {
+    openProviderAuthDialog()
+    return
+  }
+
+  closeProviderAuthDialog()
+})
+
+watch([authSession, authPolling, authPopupBlocked], () => {
+  authDialogController?.updateProps(getProviderAuthDialogProps())
+})
+
+useSilentSettingRefresh(
+  async () => {
+    if (advancedDialog.value || testingLlm.value || savingBasic.value) return
+    await loadPageData()
+  },
+  {
+    active: computed(() => props.active),
+  },
+)
+
+watch(currentLlmSnapshotKey, (snapshotKey, previousSnapshotKey) => {
+  if (snapshotKey !== previousSnapshotKey) invalidateLlmTestState()
+})
 </script>
 
 <template>
-  <ProgressDialog
-    v-if="progressDialog"
-    v-model="progressDialog"
-    :text="t('setting.system.reloading')"
-    :indeterminate="true"
-  />
-
   <VRow>
     <VCol cols="12">
       <VCard>
@@ -606,20 +1065,495 @@ onDeactivated(() => {
                 />
               </VCol>
             </VRow>
+            <VCard
+              variant="outlined"
+              :class="['mt-6', isTransparentTheme ? 'ai-agent-settings-card-transparent' : 'ai-agent-settings-card']"
+            >
+              <VCardItem class="pb-3">
+                <template #prepend>
+                  <VAvatar color="primary" variant="tonal" size="40">
+                    <VIcon icon="mdi-robot-outline" />
+                  </VAvatar>
+                </template>
+                <VCardTitle class="text-subtitle-1">
+                  {{ t('setting.system.aiAgentSectionTitle') }}
+                </VCardTitle>
+                <VCardSubtitle>
+                  {{ t('setting.system.aiAgentSectionDesc') }}
+                </VCardSubtitle>
+                <template #append>
+                  <VTooltip location="top">
+                    <template #activator="{ props }">
+                      <VBtn
+                        v-bind="props"
+                        :icon="aiAgentSettingsCollapsed ? 'mdi-chevron-down' : 'mdi-chevron-up'"
+                        variant="text"
+                        color="primary"
+                        size="small"
+                        :aria-label="aiAgentSettingsCollapsed ? t('setting.about.expand') : t('setting.about.collapse')"
+                        @click="aiAgentSettingsCollapsed = !aiAgentSettingsCollapsed"
+                      />
+                    </template>
+                    <span>{{
+                      aiAgentSettingsCollapsed ? t('setting.about.expand') : t('setting.about.collapse')
+                    }}</span>
+                  </VTooltip>
+                </template>
+              </VCardItem>
+              <VExpandTransition>
+                <VCardText v-show="!aiAgentSettingsCollapsed" class="pt-2">
+                  <VRow>
+                    <VCol cols="12" md="4">
+                      <VSwitch
+                        v-model="SystemSettings.Basic.AI_AGENT_ENABLE"
+                        :label="t('setting.system.aiAgentEnable')"
+                        :hint="t('setting.system.aiAgentEnableHint')"
+                        persistent-hint
+                      />
+                    </VCol>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE" cols="12" md="4">
+                      <VSwitch
+                        v-model="SystemSettings.Basic.AI_AGENT_GLOBAL"
+                        :label="t('setting.system.aiAgentGlobal')"
+                        :hint="t('setting.system.aiAgentGlobalHint')"
+                        persistent-hint
+                      />
+                    </VCol>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE" cols="12" md="4">
+                      <VSwitch
+                        v-model="SystemSettings.Basic.AI_AGENT_VERBOSE"
+                        :label="t('setting.system.aiAgentVerbose')"
+                        :hint="t('setting.system.aiAgentVerboseHint')"
+                        persistent-hint
+                      />
+                    </VCol>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE" cols="12" md="6">
+                      <VAutocomplete
+                        v-model="SystemSettings.Basic.LLM_PROVIDER"
+                        :label="t('setting.system.llmProvider')"
+                        :hint="t('setting.system.llmProviderHint')"
+                        persistent-hint
+                        :items="llmProviderItems"
+                        :loading="loadingLlmProviders"
+                        prepend-inner-icon="mdi-robot"
+                        @update:model-value="handleLlmProviderChanged"
+                      />
+                    </VCol>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE && showBaseUrlField" cols="12" md="6">
+                      <VCombobox
+                        :model-value="SystemSettings.Basic.LLM_BASE_URL"
+                        @update:model-value="
+                          (value: any) => {
+                            if (typeof value === 'object' && value !== null) {
+                              setBaseUrlPreset(value.id, value.value)
+                            } else {
+                              setBaseUrlPreset('', value || '')
+                            }
+                          }
+                        "
+                        :label="t('setting.system.llmBaseUrl')"
+                        :hint="t('setting.system.llmBaseUrlHint')"
+                        :placeholder="selectedLlmProvider?.default_base_url || 'https://api.deepseek.com'"
+                        :items="llmBaseUrlPresetItems"
+                        item-title="title"
+                        item-value="value"
+                        persistent-hint
+                        prepend-inner-icon="mdi-link"
+                      >
+                        <template #item="{ props, item }">
+                          <VListItem v-bind="props" :subtitle="item.raw.subtitle" />
+                        </template>
+                      </VCombobox>
+                    </VCol>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE && showApiKeyField" cols="12" md="6">
+                      <VTextField
+                        v-model="SystemSettings.Basic.LLM_API_KEY"
+                        :label="selectedLlmProvider?.api_key_label || t('setting.system.llmApiKey')"
+                        :hint="selectedLlmProvider?.api_key_hint || t('setting.system.llmApiKeyHint')"
+                        :placeholder="t('setting.system.llmApiKeyPlaceholder')"
+                        persistent-hint
+                        type="password"
+                        prepend-inner-icon="mdi-key-variant"
+                      />
+                    </VCol>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE && llmProviderAuthMethods.length > 0" cols="12">
+                      <VAlert type="info" variant="tonal">
+                        <div class="d-flex flex-column flex-md-row justify-space-between ga-3">
+                          <div>
+                            <div class="text-subtitle-2">{{ t('setting.system.llmProviderAuth') }}</div>
+                            <div class="text-body-2">
+                              {{ selectedLlmProvider?.description || t('setting.system.llmProviderAuthHint') }}
+                            </div>
+                            <div v-if="providerConnected" class="text-body-2 mt-2">
+                              {{
+                                t('setting.system.llmProviderConnectedAs', {
+                                  label: llmProviderAuthLabel || selectedLlmProvider?.name,
+                                })
+                              }}
+                            </div>
+                          </div>
+
+                          <div class="d-flex flex-wrap ga-2">
+                            <VBtn
+                              v-for="method in llmProviderAuthMethods"
+                              :key="method.id"
+                              color="primary"
+                              variant="tonal"
+                              prepend-icon="mdi-account-arrow-right-outline"
+                              @click="startProviderAuth(method.id)"
+                            >
+                              {{ method.label }}
+                            </VBtn>
+
+                            <VBtn
+                              v-if="providerConnected"
+                              color="error"
+                              variant="text"
+                              prepend-icon="mdi-link-off"
+                              @click="disconnectProviderAuth"
+                            >
+                              {{ t('setting.system.llmProviderDisconnect') }}
+                            </VBtn>
+                          </div>
+                        </div>
+                      </VAlert>
+                    </VCol>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE" cols="12" md="6">
+                      <div>
+                        <VCombobox
+                          :model-value="SystemSettings.Basic.LLM_MODEL"
+                          @update:model-value="
+                            (val: any) => {
+                              SystemSettings.Basic.LLM_MODEL = typeof val === 'object' && val !== null ? val.id : val
+                              handleLlmModelChanged()
+                            }
+                          "
+                          :label="t('setting.system.llmModel')"
+                          :hint="t('setting.system.llmModelHint')"
+                          :placeholder="t('setting.system.llmModelHint')"
+                          persistent-hint
+                          :items="llmModels"
+                          item-title="name"
+                          item-value="id"
+                          :loading="loadingModels"
+                          prepend-inner-icon="mdi-brain"
+                        >
+                          <template #append-inner>
+                            <VBtn
+                              variant="text"
+                              icon="mdi-refresh"
+                              size="small"
+                              @click="refreshLlmModels(true)"
+                              :disabled="!canRefreshModels"
+                            />
+                          </template>
+                        </VCombobox>
+
+                        <VAlert v-if="selectedLlmModelInfo" type="info" variant="tonal" density="compact" class="mt-2">
+                          {{ selectedLlmModelInfo }}
+                        </VAlert>
+
+                        <div class="d-flex justify-end mt-2">
+                          <VBtn
+                            color="info"
+                            variant="tonal"
+                            density="comfortable"
+                            prepend-icon="mdi-connection"
+                            :disabled="!canTestLlm"
+                            :loading="testingLlm"
+                            class="llm-test-trigger"
+                            @click="testLlmConnection"
+                          >
+                            {{ t('setting.system.llmTestAction') }}
+                          </VBtn>
+                        </div>
+                      </div>
+                    </VCol>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE" cols="12" md="6">
+                      <VTextField
+                        v-model.number="SystemSettings.Basic.LLM_MAX_CONTEXT_TOKENS"
+                        :label="t('setting.system.llmMaxContextTokens')"
+                        :hint="t('setting.system.llmMaxContextTokensHint')"
+                        persistent-hint
+                        type="number"
+                        prepend-inner-icon="mdi-counter"
+                      />
+                    </VCol>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE" cols="12" md="6">
+                      <VSelect
+                        v-model="SystemSettings.Basic.LLM_THINKING_LEVEL"
+                        :label="t('setting.system.llmThinking')"
+                        :hint="t('setting.system.llmThinkingHint')"
+                        :items="thinkingLevelItems"
+                        persistent-hint
+                      />
+                    </VCol>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE" cols="12" md="6">
+                      <VSelect
+                        v-model="SystemSettings.Basic.AI_AGENT_JOB_INTERVAL"
+                        :label="t('setting.system.aiAgentJobInterval')"
+                        :hint="t('setting.system.aiAgentJobIntervalHint')"
+                        persistent-hint
+                        :items="[
+                          { title: t('setting.system.aiAgentJobIntervalDisabled'), value: 0 },
+                          { title: t('setting.system.aiAgentJobInterval1h'), value: 1 },
+                          { title: t('setting.system.aiAgentJobInterval3h'), value: 3 },
+                          { title: t('setting.system.aiAgentJobInterval6h'), value: 6 },
+                          { title: t('setting.system.aiAgentJobInterval12h'), value: 12 },
+                          { title: t('setting.system.aiAgentJobInterval24h'), value: 24 },
+                          { title: t('setting.system.aiAgentJobInterval1w'), value: 168 },
+                          { title: t('setting.system.aiAgentJobInterval1M'), value: 720 },
+                        ]"
+                        prepend-inner-icon="mdi-timer-outline"
+                      />
+                    </VCol>
+                  </VRow>
+                  <VRow>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE" cols="12" md="4">
+                      <VSwitch
+                        v-model="SystemSettings.Basic.LLM_SUPPORT_IMAGE_INPUT"
+                        :label="t('setting.system.llmSupportImageInput')"
+                        :hint="t('setting.system.llmSupportImageInputHint')"
+                        persistent-hint
+                      />
+                    </VCol>
+                  </VRow>
+                  <VRow>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE" cols="12" md="6">
+                      <VSwitch
+                        v-model="SystemSettings.Basic.LLM_SUPPORT_AUDIO_INPUT"
+                        :label="t('setting.system.llmSupportAudioInput')"
+                        :hint="t('setting.system.llmSupportAudioInputHint')"
+                        persistent-hint
+                      />
+                    </VCol>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE" cols="12" md="6">
+                      <VSwitch
+                        v-model="SystemSettings.Basic.LLM_SUPPORT_AUDIO_OUTPUT"
+                        :label="t('setting.system.llmSupportAudioOutput')"
+                        :hint="t('setting.system.llmSupportAudioOutputHint')"
+                        persistent-hint
+                      />
+                    </VCol>
+                    <VCol
+                      v-if="SystemSettings.Basic.AI_AGENT_ENABLE && SystemSettings.Basic.LLM_SUPPORT_AUDIO_INPUT"
+                      cols="12"
+                      md="6"
+                    >
+                      <VSelect
+                        v-model="SystemSettings.Basic.AUDIO_INPUT_PROVIDER"
+                        :label="t('setting.system.audioInputProvider')"
+                        :hint="t('setting.system.audioInputProviderHint')"
+                        :items="audioProviderItems"
+                        persistent-hint
+                        prepend-inner-icon="mdi-microphone-message"
+                      />
+                    </VCol>
+                    <VCol
+                      v-if="SystemSettings.Basic.AI_AGENT_ENABLE && SystemSettings.Basic.LLM_SUPPORT_AUDIO_INPUT"
+                      cols="12"
+                      md="6"
+                    >
+                      <VTextField
+                        v-model="SystemSettings.Basic.AUDIO_INPUT_MODEL"
+                        :label="t('setting.system.audioInputModel')"
+                        :hint="t('setting.system.audioInputModelHint')"
+                        persistent-hint
+                        prepend-inner-icon="mdi-waveform"
+                      />
+                    </VCol>
+                    <VCol
+                      v-if="SystemSettings.Basic.AI_AGENT_ENABLE && SystemSettings.Basic.LLM_SUPPORT_AUDIO_INPUT"
+                      cols="12"
+                      md="6"
+                    >
+                      <VTextField
+                        v-model="SystemSettings.Basic.AUDIO_INPUT_API_KEY"
+                        :label="t('setting.system.audioInputApiKey')"
+                        :hint="t('setting.system.audioInputApiKeyHint')"
+                        persistent-hint
+                        prepend-inner-icon="mdi-key-variant"
+                        type="password"
+                      />
+                    </VCol>
+                    <VCol
+                      v-if="SystemSettings.Basic.AI_AGENT_ENABLE && SystemSettings.Basic.LLM_SUPPORT_AUDIO_INPUT"
+                      cols="12"
+                      md="6"
+                    >
+                      <VTextField
+                        v-model="SystemSettings.Basic.AUDIO_INPUT_BASE_URL"
+                        :label="t('setting.system.audioInputBaseUrl')"
+                        :hint="t('setting.system.audioInputBaseUrlHint')"
+                        persistent-hint
+                        prepend-inner-icon="mdi-link-variant"
+                      />
+                    </VCol>
+                    <VCol
+                      v-if="SystemSettings.Basic.AI_AGENT_ENABLE && SystemSettings.Basic.LLM_SUPPORT_AUDIO_INPUT"
+                      cols="12"
+                      md="6"
+                    >
+                      <VTextField
+                        v-model="SystemSettings.Basic.AUDIO_INPUT_LANGUAGE"
+                        :label="t('setting.system.audioInputLanguage')"
+                        :hint="t('setting.system.audioInputLanguageHint')"
+                        persistent-hint
+                        prepend-inner-icon="mdi-translate"
+                      />
+                    </VCol>
+                    <VCol
+                      v-if="SystemSettings.Basic.AI_AGENT_ENABLE && SystemSettings.Basic.LLM_SUPPORT_AUDIO_OUTPUT"
+                      cols="12"
+                      md="6"
+                    >
+                      <VSelect
+                        v-model="SystemSettings.Basic.AUDIO_OUTPUT_PROVIDER"
+                        :label="t('setting.system.audioOutputProvider')"
+                        :hint="t('setting.system.audioOutputProviderHint')"
+                        :items="audioProviderItems"
+                        persistent-hint
+                        prepend-inner-icon="mdi-account-voice"
+                      />
+                    </VCol>
+                    <VCol
+                      v-if="SystemSettings.Basic.AI_AGENT_ENABLE && SystemSettings.Basic.LLM_SUPPORT_AUDIO_OUTPUT"
+                      cols="12"
+                      md="6"
+                    >
+                      <VTextField
+                        v-model="SystemSettings.Basic.AUDIO_OUTPUT_MODEL"
+                        :label="t('setting.system.audioOutputModel')"
+                        :hint="t('setting.system.audioOutputModelHint')"
+                        persistent-hint
+                        prepend-inner-icon="mdi-waveform"
+                      />
+                    </VCol>
+                    <VCol
+                      v-if="SystemSettings.Basic.AI_AGENT_ENABLE && SystemSettings.Basic.LLM_SUPPORT_AUDIO_OUTPUT"
+                      cols="12"
+                      md="6"
+                    >
+                      <VTextField
+                        v-model="SystemSettings.Basic.AUDIO_OUTPUT_API_KEY"
+                        :label="t('setting.system.audioOutputApiKey')"
+                        :hint="t('setting.system.audioOutputApiKeyHint')"
+                        persistent-hint
+                        prepend-inner-icon="mdi-key-variant"
+                        type="password"
+                      />
+                    </VCol>
+                    <VCol
+                      v-if="SystemSettings.Basic.AI_AGENT_ENABLE && SystemSettings.Basic.LLM_SUPPORT_AUDIO_OUTPUT"
+                      cols="12"
+                      md="6"
+                    >
+                      <VTextField
+                        v-model="SystemSettings.Basic.AUDIO_OUTPUT_BASE_URL"
+                        :label="t('setting.system.audioOutputBaseUrl')"
+                        :hint="t('setting.system.audioOutputBaseUrlHint')"
+                        persistent-hint
+                        prepend-inner-icon="mdi-link-variant"
+                      />
+                    </VCol>
+                    <VCol
+                      v-if="SystemSettings.Basic.AI_AGENT_ENABLE && SystemSettings.Basic.LLM_SUPPORT_AUDIO_OUTPUT"
+                      cols="12"
+                      md="6"
+                    >
+                      <VTextField
+                        v-model="SystemSettings.Basic.AUDIO_OUTPUT_VOICE"
+                        :label="t('setting.system.audioOutputVoice')"
+                        :hint="t('setting.system.audioOutputVoiceHint')"
+                        persistent-hint
+                        prepend-inner-icon="mdi-account-voice"
+                      />
+                    </VCol>
+                    <VCol
+                      v-if="SystemSettings.Basic.AI_AGENT_ENABLE && SystemSettings.Basic.LLM_SUPPORT_AUDIO_OUTPUT"
+                      cols="12"
+                    >
+                      <VSwitch
+                        v-model="SystemSettings.Basic.AUDIO_OUTPUT_INCLUDE_TEXT"
+                        :label="t('setting.system.audioOutputIncludeText')"
+                        :hint="t('setting.system.audioOutputIncludeTextHint')"
+                        persistent-hint
+                      />
+                    </VCol>
+                  </VRow>
+                  <VRow>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE" cols="12">
+                      <VSwitch
+                        v-model="SystemSettings.Basic.AI_AGENT_RETRY_TRANSFER"
+                        :label="t('setting.system.aiAgentRetryTransfer')"
+                        :hint="t('setting.system.aiAgentRetryTransferHint')"
+                        persistent-hint
+                      />
+                    </VCol>
+                  </VRow>
+                  <VRow>
+                    <VCol v-if="SystemSettings.Basic.AI_AGENT_ENABLE" cols="12">
+                      <VSwitch
+                        v-model="SystemSettings.Basic.AI_RECOMMEND_ENABLED"
+                        :label="t('setting.system.aiRecommendEnabled')"
+                        :hint="t('setting.system.aiRecommendEnabledHint')"
+                        persistent-hint
+                      />
+                    </VCol>
+                    <VCol
+                      v-if="SystemSettings.Basic.AI_AGENT_ENABLE && SystemSettings.Basic.AI_RECOMMEND_ENABLED"
+                      cols="12"
+                      md="6"
+                    >
+                      <VTextarea
+                        v-model="SystemSettings.Basic.AI_RECOMMEND_USER_PREFERENCE"
+                        :label="t('setting.system.aiRecommendUserPreference')"
+                        :hint="t('setting.system.aiRecommendUserPreferenceHint')"
+                        persistent-hint
+                        rows="1"
+                        auto-grow
+                        prepend-inner-icon="mdi-account-heart"
+                      />
+                    </VCol>
+                    <VCol
+                      v-if="SystemSettings.Basic.AI_AGENT_ENABLE && SystemSettings.Basic.AI_RECOMMEND_ENABLED"
+                      cols="12"
+                      md="6"
+                    >
+                      <VTextField
+                        v-model.number="SystemSettings.Basic.AI_RECOMMEND_MAX_ITEMS"
+                        :label="t('setting.system.aiRecommendMaxItems')"
+                        :hint="t('setting.system.aiRecommendMaxItemsHint')"
+                        persistent-hint
+                        type="number"
+                        prepend-inner-icon="mdi-format-list-numbered"
+                      />
+                    </VCol>
+                  </VRow>
+                </VCardText>
+              </VExpandTransition>
+            </VCard>
           </VForm>
         </VCardText>
         <VCardText>
           <VForm @submit.prevent="() => {}">
-            <div class="d-flex flex-wrap gap-4 mt-4">
-              <VBtn type="submit" @click="saveBasicSettings" prepend-icon="mdi-content-save">
+            <div class="setting-actions mt-4">
+              <VBtn
+                type="submit"
+                @click="saveBasicSettings"
+                prepend-icon="mdi-content-save"
+                :loading="savingBasic"
+                :disabled="testingLlm"
+                class="text-no-wrap"
+              >
                 {{ t('common.save') }}
               </VBtn>
-              <VSpacer />
               <VBtn
                 color="error"
                 @click="advancedDialog = true"
                 prepend-icon="mdi-cog"
                 append-icon="mdi-dots-horizontal"
+                class="text-no-wrap setting-actions__secondary"
               >
                 {{ t('setting.system.advancedSettings') }}
               </VBtn>
@@ -629,6 +1563,7 @@ onDeactivated(() => {
       </VCard>
     </VCol>
   </VRow>
+
   <VRow>
     <VCol cols="12">
       <VCard>
@@ -637,7 +1572,7 @@ onDeactivated(() => {
           <VCardSubtitle>{{ t('setting.system.downloadersDesc') }}</VCardSubtitle>
         </VCardItem>
         <VCardText>
-          <draggable
+          <Draggable
             v-model="downloaders"
             handle=".cursor-move"
             item-key="name"
@@ -653,7 +1588,7 @@ onDeactivated(() => {
                 :allow-refresh="isRequest"
               />
             </template>
-          </draggable>
+          </Draggable>
         </VCardText>
         <VCardText>
           <VForm @submit.prevent="() => {}">
@@ -688,7 +1623,7 @@ onDeactivated(() => {
           <VCardSubtitle>{{ t('setting.system.mediaServersDesc') }}</VCardSubtitle>
         </VCardItem>
         <VCardText>
-          <draggable
+          <Draggable
             v-model="mediaServers"
             handle=".cursor-move"
             item-key="name"
@@ -703,7 +1638,7 @@ onDeactivated(() => {
                 @change="onMediaServerChange"
               />
             </template>
-          </draggable>
+          </Draggable>
         </VCardText>
         <VCardText>
           <VForm @submit.prevent="() => {}">
@@ -732,7 +1667,7 @@ onDeactivated(() => {
   </VRow>
 
   <!-- 高级系统设置 -->
-  <DialogWrapper
+  <VDialog
     v-if="advancedDialog"
     v-model="advancedDialog"
     scrollable
@@ -758,6 +1693,9 @@ onDeactivated(() => {
           </VTab>
           <VTab value="network">
             <div>{{ t('setting.system.network') }}</div>
+          </VTab>
+          <VTab value="data">
+            <div>{{ t('setting.system.data') }}</div>
           </VTab>
           <VTab value="log">
             <div>{{ t('setting.system.log') }}</div>
@@ -818,7 +1756,7 @@ onDeactivated(() => {
                     persistent-hint
                   />
                 </VCol>
-                <VCol cols="12" md="6">
+                <VCol v-if="SystemSettings.Basic.DB_TYPE === 'sqlite'" cols="12" md="6">
                   <VSwitch
                     v-model="SystemSettings.Advanced.DB_WAL_ENABLE"
                     :label="t('setting.system.dbWalEnable')"
@@ -867,7 +1805,7 @@ onDeactivated(() => {
                     :hint="t('setting.system.tmdbImageDomainHint')"
                     persistent-hint
                     :placeholder="t('setting.system.tmdbImageDomainPlaceholder')"
-                    :items="['image.tmdb.org', 'static-mdb.v.geilijiasu.com']"
+                    :items="['image.tmdb.org']"
                     :rules="[(v: string) => !!v || t('setting.system.tmdbImageDomainRequired')]"
                     prepend-inner-icon="mdi-image"
                   />
@@ -917,6 +1855,26 @@ onDeactivated(() => {
                     persistent-hint
                   />
                 </VCol>
+              </VRow>
+              <VRow>
+                <VCol cols="12" md="6">
+                  <VSwitch
+                    v-model="SystemSettings.Advanced.RECOGNIZE_PLUGIN_FIRST"
+                    :label="t('setting.system.recognizePluginFirst')"
+                    :hint="t('setting.system.recognizePluginFirstHint')"
+                    persistent-hint
+                  />
+                </VCol>
+                <VCol cols="12" md="6">
+                  <VSwitch
+                    v-model="SystemSettings.Advanced.MEDIA_RECOGNIZE_SHARE"
+                    :label="t('setting.system.mediaRecognizeShare')"
+                    :hint="t('setting.system.mediaRecognizeShareHint')"
+                    persistent-hint
+                  />
+                </VCol>
+              </VRow>
+              <VRow>
                 <VCol cols="12" md="6">
                   <VSwitch
                     v-model="SystemSettings.Advanced.FANART_ENABLE"
@@ -946,173 +1904,68 @@ onDeactivated(() => {
                   <VExpansionPanels>
                     <VExpansionPanel>
                       <VExpansionPanelTitle class="text-lg">
-                        <template #default>
-                          <VIcon icon="mdi-checkbox-multiple-outline" class="me-2" />
-                          {{ t('setting.system.scrapingSwitchSettings') }}
-                        </template>
+                        <VIcon icon="mdi-checkbox-multiple-outline" class="me-2" />
+                        {{ t('setting.system.scrapingSwitchSettings') }}
+                        <!-- 帮助图标 -->
+                        <VTooltip location="bottom" open-delay="200">
+                          <template #activator="{ props: tooltipProps }">
+                            <VBtn
+                              v-bind="tooltipProps"
+                              icon="mdi-help-circle"
+                              size="small"
+                              variant="text"
+                              color="medium-emphasis"
+                              class="ml-2"
+                              @click.stop
+                            />
+                          </template>
+                          <div class="d-flex flex-column gap-2 py-2">
+                            <div class="d-flex align-center">
+                              <VIcon icon="mdi-file-remove" color="error" class="mr-2" />
+                              <span>{{ t('setting.system.policy.skipDesc') }}</span>
+                            </div>
+                            <div class="d-flex align-center">
+                              <VIcon icon="mdi-file-plus" color="success" class="mr-2" />
+                              <span>{{ t('setting.system.policy.missingOnlyDesc') }}</span>
+                            </div>
+                            <div class="d-flex align-center">
+                              <VIcon icon="mdi-file-replace" color="primary" class="mr-2" />
+                              <span>{{ t('setting.system.policy.overwriteDesc') }}</span>
+                            </div>
+                          </div>
+                        </VTooltip>
                       </VExpansionPanelTitle>
                       <VExpansionPanelText>
-                        <VRow>
-                          <VCol cols="12" class="pb-2">
-                            <VListSubheader class="text-lg">{{ t('setting.system.movie') }}</VListSubheader>
+                        <VRow v-for="section in scrapingConfig" :key="section.section">
+                          <VCol cols="12">
+                            <VListSubheader class="text-lg">
+                              {{ t(`setting.system.${section.section}`) }}
+                            </VListSubheader>
                           </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.movie_nfo"
-                              :label="t('setting.system.movieNfo')"
-                              density="compact"
-                            />
+                          <VCol v-for="item in section.items" :key="item.key" cols="12" md="4">
+                            <div class="d-flex align-center">
+                              <VBtnToggle
+                                :model-value="ScrapingPolicies[item.key]"
+                                @update:model-value="ScrapingPolicies[item.key] = $event"
+                                color="primary"
+                                variant="tonal"
+                                size="small"
+                                rounded="lg"
+                              >
+                                <VBtn value="skip" color="error" size="small">
+                                  <VIcon icon="mdi-file-remove" />
+                                </VBtn>
+                                <VBtn value="missingOnly" color="success" size="small">
+                                  <VIcon icon="mdi-file-plus" />
+                                </VBtn>
+                                <VBtn value="overwrite" color="primary" size="small">
+                                  <VIcon icon="mdi-file-replace" />
+                                </VBtn>
+                              </VBtnToggle>
+                              <span class="ml-2">{{ t(item.label) }}</span>
+                            </div>
                           </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.movie_poster"
-                              :label="t('setting.system.moviePoster')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.movie_backdrop"
-                              :label="t('setting.system.movieBackdrop')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.movie_logo"
-                              :label="t('setting.system.movieLogo')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.movie_disc"
-                              :label="t('setting.system.movieDisc')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.movie_banner"
-                              :label="t('setting.system.movieBanner')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.movie_thumb"
-                              :label="t('setting.system.movieThumb')"
-                              density="compact"
-                            />
-                          </VCol>
-                        </VRow>
-
-                        <VDivider class="my-4" />
-
-                        <VRow>
-                          <VCol cols="12" class="pb-2">
-                            <VListSubheader class="text-lg">{{ t('setting.system.tv') }}</VListSubheader>
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.tv_nfo"
-                              :label="t('setting.system.tvNfo')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.tv_poster"
-                              :label="t('setting.system.tvPoster')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.tv_backdrop"
-                              :label="t('setting.system.tvBackdrop')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.tv_banner"
-                              :label="t('setting.system.tvBanner')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.tv_logo"
-                              :label="t('setting.system.tvLogo')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.tv_thumb"
-                              :label="t('setting.system.tvThumb')"
-                              density="compact"
-                            />
-                          </VCol>
-                        </VRow>
-
-                        <VDivider class="my-4" />
-
-                        <VRow>
-                          <VCol cols="12" class="pb-2">
-                            <VListSubheader class="text-lg">{{ t('setting.system.season') }}</VListSubheader>
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.season_nfo"
-                              :label="t('setting.system.seasonNfo')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.season_poster"
-                              :label="t('setting.system.seasonPoster')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.season_banner"
-                              :label="t('setting.system.seasonBanner')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.season_thumb"
-                              :label="t('setting.system.seasonThumb')"
-                              density="compact"
-                            />
-                          </VCol>
-                        </VRow>
-
-                        <VDivider class="my-4" />
-
-                        <VRow>
-                          <VCol cols="12" class="pb-2">
-                            <VListSubheader class="text-lg">{{ t('setting.system.episode') }}</VListSubheader>
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.episode_nfo"
-                              :label="t('setting.system.episodeNfo')"
-                              density="compact"
-                            />
-                          </VCol>
-                          <VCol cols="6" md="3">
-                            <VCheckbox
-                              v-model="ScrapingSwitchs.episode_thumb"
-                              :label="t('setting.system.episodeThumb')"
-                              density="compact"
-                            />
-                          </VCol>
+                          <VDivider v-if="section.section !== 'episode'" class="my-4" />
                         </VRow>
                       </VExpansionPanelText>
                     </VExpansionPanel>
@@ -1235,6 +2088,74 @@ onDeactivated(() => {
               </VRow>
             </div>
           </VWindowItem>
+          <VWindowItem value="data">
+            <div>
+              <VRow>
+                <VCol cols="12">
+                  <VSwitch
+                    v-model="SystemSettings.Advanced.DATA_CLEANUP_ENABLE"
+                    :label="t('setting.system.dataCleanupEnable')"
+                    :hint="t('setting.system.dataCleanupEnableHint')"
+                    persistent-hint
+                  />
+                </VCol>
+                <template v-if="SystemSettings.Advanced.DATA_CLEANUP_ENABLE">
+                  <VCol cols="12" md="6">
+                    <VTextField
+                      v-model.number="SystemSettings.Advanced.DATA_CLEANUP_MESSAGE_DAYS"
+                      :label="t('setting.system.dataCleanupMessageDays')"
+                      :hint="t('setting.system.dataCleanupMessageDaysHint')"
+                      persistent-hint
+                      min="0"
+                      type="number"
+                      :suffix="t('setting.system.day')"
+                      :rules="dataCleanupFieldRules"
+                      prepend-inner-icon="mdi-email-outline"
+                    />
+                  </VCol>
+                  <VCol cols="12" md="6">
+                    <VTextField
+                      v-model.number="SystemSettings.Advanced.DATA_CLEANUP_DOWNLOAD_HISTORY_DAYS"
+                      :label="t('setting.system.dataCleanupDownloadHistoryDays')"
+                      :hint="t('setting.system.dataCleanupDownloadHistoryDaysHint')"
+                      persistent-hint
+                      min="0"
+                      type="number"
+                      :suffix="t('setting.system.day')"
+                      :rules="dataCleanupFieldRules"
+                      prepend-inner-icon="mdi-download-circle-outline"
+                    />
+                  </VCol>
+                  <VCol cols="12" md="6">
+                    <VTextField
+                      v-model.number="SystemSettings.Advanced.DATA_CLEANUP_SITE_USERDATA_DAYS"
+                      :label="t('setting.system.dataCleanupSiteUserDataDays')"
+                      :hint="t('setting.system.dataCleanupSiteUserDataDaysHint')"
+                      persistent-hint
+                      min="0"
+                      type="number"
+                      :suffix="t('setting.system.day')"
+                      :rules="dataCleanupFieldRules"
+                      prepend-inner-icon="mdi-chart-line"
+                    />
+                  </VCol>
+                  <VCol cols="12" md="6">
+                    <VTextField
+                      v-model.number="SystemSettings.Advanced.DATA_CLEANUP_TRANSFER_HISTORY_DAYS"
+                      :label="t('setting.system.dataCleanupTransferHistoryDays')"
+                      :hint="t('setting.system.dataCleanupTransferHistoryDaysHint')"
+                      persistent-hint
+                      min="0"
+                      type="number"
+                      :suffix="t('setting.system.day')"
+                      :rules="dataCleanupFieldRules"
+                      prepend-inner-icon="mdi-swap-horizontal"
+                    />
+                  </VCol>
+                </template>
+              </VRow>
+            </div>
+          </VWindowItem>
           <VWindowItem value="log">
             <div>
               <VRow>
@@ -1266,7 +2187,10 @@ onDeactivated(() => {
                     min="1"
                     type="number"
                     :suffix="t('setting.system.mb')"
-                    :rules="[(v: any) => v === 0 || !!v || t('setting.system.logMaxFileSizeRequired'), (v: any) => v >= 1 || t('setting.system.logMaxFileSizeMin')]"
+                    :rules="[
+                      (v: any) => v === 0 || !!v || t('setting.system.logMaxFileSizeRequired'),
+                      (v: any) => v >= 1 || t('setting.system.logMaxFileSizeMin'),
+                    ]"
                     prepend-inner-icon="mdi-file-document"
                   />
                 </VCol>
@@ -1278,7 +2202,10 @@ onDeactivated(() => {
                     persistent-hint
                     min="1"
                     type="number"
-                    :rules="[(v: any) => v === 0 || !!v || t('setting.system.logBackupCountRequired'), (v: any) => v >= 1 || t('setting.system.logBackupCountMin')]"
+                    :rules="[
+                      (v: any) => v === 0 || !!v || t('setting.system.logBackupCountRequired'),
+                      (v: any) => v >= 1 || t('setting.system.logBackupCountMin'),
+                    ]"
                     prepend-inner-icon="mdi-backup-restore"
                   />
                 </VCol>
@@ -1306,11 +2233,31 @@ onDeactivated(() => {
                   />
                 </VCol>
                 <VCol cols="12" md="6">
+                  <VTextField
+                    v-model="SystemSettings.Advanced.PLUGIN_LOCAL_REPO_PATHS"
+                    :label="t('setting.system.pluginLocalRepoPaths')"
+                    :hint="t('setting.system.pluginLocalRepoPathsHint')"
+                    persistent-hint
+                    prepend-inner-icon="mdi-folder"
+                  />
+                </VCol>
+                <VCol cols="12" md="6">
                   <VSwitch
                     v-model="SystemSettings.Advanced.ENCODING_DETECTION_PERFORMANCE_MODE"
                     :label="t('setting.system.encodingDetectionPerformanceMode')"
                     :hint="t('setting.system.encodingDetectionPerformanceModeHint')"
                     persistent-hint
+                  />
+                </VCol>
+                <VCol cols="12" md="6">
+                  <VTextField
+                    v-model.number="SystemSettings.Advanced.TRANSFER_THREADS"
+                    :label="t('setting.system.transferThreads')"
+                    :hint="t('setting.system.transferThreadsHint')"
+                    persistent-hint
+                    type="number"
+                    min="1"
+                    prepend-inner-icon="mdi-swap-horizontal"
                   />
                 </VCol>
               </VRow>
@@ -1328,5 +2275,32 @@ onDeactivated(() => {
         </VForm>
       </VCardActions>
     </VCard>
-  </DialogWrapper>
+  </VDialog>
 </template>
+
+<style scoped>
+.ai-agent-settings-card {
+  border-color: rgba(var(--v-theme-primary), 0.15);
+  background: linear-gradient(180deg, rgba(var(--v-theme-primary), 0.04) 0%, rgba(var(--v-theme-surface), 0.92) 100%);
+}
+
+.ai-agent-settings-card-transparent {
+  border-color: rgba(var(--v-theme-primary), 0);
+  background-color: rgba(var(--v-theme-surface), 0) !important;
+}
+
+.setting-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.setting-actions__secondary {
+  flex-shrink: 0;
+}
+
+.llm-test-trigger {
+  min-inline-size: 0;
+}
+</style>

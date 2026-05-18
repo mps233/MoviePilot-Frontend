@@ -45,15 +45,15 @@ onMounted(() => {
 </script>
 
 <template>
-  <VCard variant="tonal">
-    <span class="absolute top-3 right-12">
-      <IconBtn>
+  <VCard variant="tonal" class="app-card-shell">
+    <span class="app-card-top-action absolute top-3 right-12">
+      <IconBtn @click.stop>
         <VIcon class="cursor-move" icon="mdi-drag" />
       </IconBtn>
     </span>
     <VDialogCloseBtn @click="onClose" />
     <VCardItem>
-      <VCardTitle>{{ t('filterRule.priority') }} {{ props.pri }}</VCardTitle>
+      <VCardTitle class="pr-8">{{ t('filterRule.priority') }} {{ props.pri }}</VCardTitle>
       <VRow>
         <VCol>
           <VAutocomplete
